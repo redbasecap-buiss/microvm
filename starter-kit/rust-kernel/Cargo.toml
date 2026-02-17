@@ -1,0 +1,13 @@
+[package]
+name = "rust-kernel"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal RISC-V kernel in Rust — boots on microvm"
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
