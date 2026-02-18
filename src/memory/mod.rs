@@ -1,11 +1,13 @@
 pub mod ram;
 pub mod rom;
 
-use crate::devices::{clint::Clint, plic::Plic, uart::Uart};
+use crate::devices::{clint::Clint, plic::Plic, uart::Uart, virtio_blk::VirtioBlk};
 
 // Memory map
 pub const UART_BASE: u64 = 0x1000_0000;
 pub const UART_SIZE: u64 = 0x100;
+pub const VIRTIO0_BASE: u64 = 0x1000_1000;
+pub const VIRTIO0_SIZE: u64 = 0x1000;
 pub const CLINT_BASE: u64 = 0x0200_0000;
 pub const CLINT_SIZE: u64 = 0x10000;
 pub const PLIC_BASE: u64 = 0x0C00_0000;
@@ -18,6 +20,7 @@ pub struct Bus {
     pub uart: Uart,
     pub clint: Clint,
     pub plic: Plic,
+    pub virtio_blk: VirtioBlk,
 }
 
 impl Bus {
@@ -27,12 +30,16 @@ impl Bus {
             uart: Uart::new(),
             clint: Clint::new(),
             plic: Plic::new(),
+            virtio_blk: VirtioBlk::new(),
         }
     }
 
     pub fn read8(&mut self, addr: u64) -> u8 {
         if addr >= UART_BASE && addr < UART_BASE + UART_SIZE {
             return self.uart.read_mut(addr - UART_BASE) as u8;
+        }
+        if addr >= VIRTIO0_BASE && addr < VIRTIO0_BASE + VIRTIO0_SIZE {
+            return self.virtio_blk.read(addr - VIRTIO0_BASE) as u8;
         }
         if addr >= DRAM_BASE && addr < DRAM_BASE + self.ram.size() {
             return self.ram.read8(addr - DRAM_BASE);
@@ -53,6 +60,9 @@ impl Bus {
     }
 
     pub fn read32(&mut self, addr: u64) -> u32 {
+        if addr >= VIRTIO0_BASE && addr < VIRTIO0_BASE + VIRTIO0_SIZE {
+            return self.virtio_blk.read(addr - VIRTIO0_BASE) as u32;
+        }
         if addr >= DRAM_BASE && addr < DRAM_BASE + self.ram.size() {
             return self.ram.read32(addr - DRAM_BASE);
         }
@@ -84,6 +94,10 @@ impl Bus {
             self.uart.write(addr - UART_BASE, val as u64);
             return;
         }
+        if addr >= VIRTIO0_BASE && addr < VIRTIO0_BASE + VIRTIO0_SIZE {
+            self.virtio_blk.write(addr - VIRTIO0_BASE, val as u64);
+            return;
+        }
         if addr >= DRAM_BASE && addr < DRAM_BASE + self.ram.size() {
             self.ram.write8(addr - DRAM_BASE, val);
             return;
@@ -103,6 +117,10 @@ impl Bus {
     }
 
     pub fn write32(&mut self, addr: u64, val: u32) {
+        if addr >= VIRTIO0_BASE && addr < VIRTIO0_BASE + VIRTIO0_SIZE {
+            self.virtio_blk.write(addr - VIRTIO0_BASE, val as u64);
+            return;
+        }
         if addr >= DRAM_BASE && addr < DRAM_BASE + self.ram.size() {
             self.ram.write32(addr - DRAM_BASE, val);
             return;
@@ -135,5 +153,10 @@ impl Bus {
     /// Load binary data into RAM at given offset from DRAM_BASE
     pub fn load_binary(&mut self, data: &[u8], offset: u64) {
         self.ram.load(data, offset);
+    }
+
+    /// Get raw RAM slice for VirtIO DMA access
+    pub fn ram_slice_mut(&mut self) -> &mut [u8] {
+        self.ram.as_mut_slice()
     }
 }

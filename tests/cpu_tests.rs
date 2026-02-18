@@ -460,7 +460,7 @@ fn test_addiw_sign_extend() {
 
 #[test]
 fn test_dtb_generation() {
-    let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "console=ttyS0");
+    let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "console=ttyS0", false);
     // DTB magic number
     assert_eq!(dtb[0], 0xD0);
     assert_eq!(dtb[1], 0x0D);

@@ -152,7 +152,7 @@ impl DtbBuilder {
 }
 
 /// Generate a Device Tree Blob for Linux boot
-pub fn generate_dtb(ram_size: u64, cmdline: &str) -> Vec<u8> {
+pub fn generate_dtb(ram_size: u64, cmdline: &str, has_virtio_blk: bool) -> Vec<u8> {
     let mut b = DtbBuilder::new();
 
     // Root node
@@ -243,6 +243,19 @@ pub fn generate_dtb(ram_size: u64, cmdline: &str) -> Vec<u8> {
     b.prop_u32_array("interrupts", &[10]);
     b.prop_u32("interrupt-parent", 2);
     b.end_node();
+
+    // VirtIO MMIO Block Device
+    if has_virtio_blk {
+        b.begin_node(&format!("virtio_mmio@{:x}", memory::VIRTIO0_BASE));
+        b.prop_str("compatible", "virtio,mmio");
+        b.prop_u32_array("reg", &[
+            (memory::VIRTIO0_BASE >> 32) as u32, memory::VIRTIO0_BASE as u32,
+            0, memory::VIRTIO0_SIZE as u32,
+        ]);
+        b.prop_u32_array("interrupts", &[8]);
+        b.prop_u32("interrupt-parent", 2);
+        b.end_node();
+    }
 
     b.end_node(); // soc
     b.end_node(); // root

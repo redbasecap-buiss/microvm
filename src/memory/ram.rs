@@ -72,6 +72,10 @@ impl Ram {
         }
     }
 
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        &mut self.data
+    }
+
     pub fn load(&mut self, data: &[u8], offset: u64) {
         let start = offset as usize;
         let end = start + data.len();

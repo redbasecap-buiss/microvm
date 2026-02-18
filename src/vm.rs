@@ -48,8 +48,16 @@ impl Vm {
             self.config.load_addr
         );
 
+        // Attach disk image if provided
+        if let Some(ref disk_path) = self.config.disk_path {
+            if let Err(e) = self.bus.virtio_blk.attach_disk(disk_path) {
+                eprintln!("Warning: Failed to attach disk {}: {}", disk_path.display(), e);
+            }
+        }
+
         // Generate and load DTB
-        let dtb_data = dtb::generate_dtb(ram_bytes, &self.config.kernel_cmdline);
+        let has_disk = self.config.disk_path.is_some();
+        let dtb_data = dtb::generate_dtb(ram_bytes, &self.config.kernel_cmdline, has_disk);
         // Place DTB at end of RAM (aligned)
         let dtb_addr = DRAM_BASE + ram_bytes - ((dtb_data.len() as u64 + 0xFFF) & !0xFFF);
         let dtb_offset = dtb_addr - DRAM_BASE;
@@ -94,6 +102,12 @@ impl Vm {
             if self.bus.uart.has_interrupt() {
                 self.bus.plic.set_pending(10); // UART IRQ = 10
             }
+
+            // Update VirtIO block interrupt
+            if self.bus.virtio_blk.has_interrupt() {
+                self.bus.plic.set_pending(8); // VirtIO blk IRQ = 8
+            }
+
             if self.bus.plic.has_interrupt(1) {
                 let mip = self.cpu.csrs.read(csr::MIP);
                 self.cpu.csrs.write(csr::MIP, mip | (1 << 9)); // SEIP
@@ -105,9 +119,16 @@ impl Vm {
 
             insn_count += 1;
 
-            // Periodic stdin poll (every 1024 instructions)
+            // Periodic tasks (every 1024 instructions)
             if insn_count & 0x3FF == 0 {
                 poll_stdin(&mut self.bus.uart);
+
+                // Process VirtIO block queue
+                if self.bus.virtio_blk.needs_processing() {
+                    let dram_base = DRAM_BASE;
+                    let ram = self.bus.ram.as_mut_slice();
+                    self.bus.virtio_blk.process_queue(ram, dram_base);
+                }
             }
         }
 
@@ -117,9 +138,7 @@ impl Vm {
 
 fn poll_stdin(uart: &mut crate::devices::uart::Uart) {
     use std::io::Read;
-    // Non-blocking read from stdin
     let mut buf = [0u8; 1];
-    // Use libc to check if data is available
     unsafe {
         let mut fds = libc::pollfd {
             fd: 0, // stdin
