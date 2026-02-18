@@ -14,10 +14,14 @@ pub const MCAUSE: u16 = 0x342;
 pub const MTVAL: u16 = 0x343;
 pub const MIP: u16 = 0x344;
 pub const PMPCFG0: u16 = 0x3A0;
+pub const PMPCFG2: u16 = 0x3A2;
 pub const PMPADDR0: u16 = 0x3B0;
 pub const MHARTID: u16 = 0xF14;
 pub const MCYCLE: u16 = 0xB00;
 pub const MINSTRET: u16 = 0xB02;
+pub const MVENDORID: u16 = 0xF11;
+pub const MARCHID: u16 = 0xF12;
+pub const MIMPID: u16 = 0xF13;
 
 // Supervisor-level CSRs
 pub const SSTATUS: u16 = 0x100;
@@ -54,15 +58,23 @@ const SSTATUS_MASK: u64 = MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP | MSTATUS_SUM
 
 pub struct CsrFile {
     regs: HashMap<u16, u64>,
+    /// PMP configuration registers (pmpcfg0-pmpcfg3 for RV64 = 2 regs × 8 entries each)
+    pub pmpcfg: [u64; 4],
+    /// PMP address registers (pmpaddr0-pmpaddr15)
+    pub pmpaddr: [u64; 16],
+    /// Cached mtime from CLINT (updated each step for TIME CSR reads)
+    pub mtime: u64,
 }
 
 impl CsrFile {
     pub fn new() -> Self {
         let mut csrs = Self {
             regs: HashMap::new(),
+            pmpcfg: [0; 4],
+            pmpaddr: [0; 16],
+            mtime: 0,
         };
         // MISA: RV64IMACSU
-        // Bit layout: MXL=2 (64-bit) in bits [63:62], then extension bits
         let misa = (2u64 << 62)  // MXL = 64-bit
             | (1 << 0)   // A - Atomic
             | (1 << 2)   // C - Compressed
@@ -72,6 +84,13 @@ impl CsrFile {
             | (1 << 20); // U - User mode
         csrs.regs.insert(MISA, misa);
         csrs.regs.insert(MHARTID, 0);
+        // MSTATUS: set UXL=2 (64-bit) and SXL=2 (64-bit)
+        let mstatus = (2u64 << 32) | (2u64 << 34); // UXL | SXL
+        csrs.regs.insert(MSTATUS, mstatus);
+        // Read-only zero registers
+        csrs.regs.insert(MVENDORID, 0);
+        csrs.regs.insert(MARCHID, 0);
+        csrs.regs.insert(MIMPID, 0);
         csrs
     }
 
@@ -86,7 +105,7 @@ impl CsrFile {
             // User-level counter CSRs (read-only shadows)
             CYCLE => self.regs.get(&MCYCLE).copied().unwrap_or(0),
             INSTRET => self.regs.get(&MINSTRET).copied().unwrap_or(0),
-            TIME => 0, // TIME is typically read from CLINT mtime, handled separately
+            TIME => self.mtime,
             SSTATUS => self.regs.get(&MSTATUS).copied().unwrap_or(0) & SSTATUS_MASK,
             SIE => {
                 let mie = self.regs.get(&MIE).copied().unwrap_or(0);
@@ -98,13 +117,20 @@ impl CsrFile {
                 let mideleg = self.regs.get(&MIDELEG).copied().unwrap_or(0);
                 mip & mideleg
             }
+            // PMP config registers (RV64: pmpcfg0 at 0x3A0, pmpcfg2 at 0x3A2)
+            0x3A0 => self.pmpcfg[0],
+            0x3A1 => 0, // pmpcfg1 is not accessible on RV64
+            0x3A2 => self.pmpcfg[1],
+            0x3A3 => 0, // pmpcfg3 is not accessible on RV64
+            // PMP address registers (0x3B0 - 0x3BF)
+            0x3B0..=0x3BF => self.pmpaddr[(addr - 0x3B0) as usize],
             _ => self.regs.get(&addr).copied().unwrap_or(0),
         }
     }
 
     pub fn write(&mut self, addr: u16, val: u64) {
         match addr {
-            MISA | MHARTID => {} // Read-only
+            MISA | MHARTID | MVENDORID | MARCHID | MIMPID => {} // Read-only
             SSTATUS => {
                 let mstatus = self.regs.get(&MSTATUS).copied().unwrap_or(0);
                 let new_mstatus = (mstatus & !SSTATUS_MASK) | (val & SSTATUS_MASK);
@@ -122,6 +148,20 @@ impl CsrFile {
                 let writable = mideleg & (1 << 1);
                 self.regs.insert(MIP, (mip & !writable) | (val & writable));
             }
+            MSTATUS => {
+                // Preserve read-only fields SXL/UXL
+                let old = self.regs.get(&MSTATUS).copied().unwrap_or(0);
+                let sxl_uxl_mask = (3u64 << 32) | (3u64 << 34);
+                let new_val = (val & !sxl_uxl_mask) | (old & sxl_uxl_mask);
+                self.regs.insert(MSTATUS, new_val);
+            }
+            // PMP config registers
+            0x3A0 => self.pmpcfg[0] = val,
+            0x3A1 => {} // not accessible on RV64
+            0x3A2 => self.pmpcfg[1] = val,
+            0x3A3 => {}
+            // PMP address registers
+            0x3B0..=0x3BF => self.pmpaddr[(addr - 0x3B0) as usize] = val,
             _ => {
                 self.regs.insert(addr, val);
             }

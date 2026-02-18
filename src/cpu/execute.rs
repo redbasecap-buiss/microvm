@@ -312,6 +312,13 @@ fn op_system(cpu: &mut Cpu, bus: &mut Bus, inst: &Instruction, len: u64) -> bool
     if inst.funct3 == 0 {
         match inst.raw {
             0x00000073 => { // ECALL
+                if cpu.mode == PrivilegeMode::Supervisor {
+                    // SBI call — handle in M-mode firmware
+                    if handle_sbi_call(cpu, bus) {
+                        cpu.pc += len;
+                        return true;
+                    }
+                }
                 let cause = match cpu.mode {
                     PrivilegeMode::User => 8,
                     PrivilegeMode::Supervisor => 9,
@@ -400,4 +407,177 @@ fn op_system(cpu: &mut Cpu, bus: &mut Bus, inst: &Instruction, len: u64) -> bool
     cpu.regs[inst.rd] = old_val;
     cpu.pc += len;
     true
+}
+
+/// Handle SBI (Supervisor Binary Interface) calls from S-mode.
+/// Uses the RISC-V SBI specification:
+///   a7 = extension ID (EID), a6 = function ID (FID)
+///   a0-a5 = arguments
+///   Returns: a0 = error code, a1 = value
+/// Returns true if handled, false to fall through to normal ecall.
+fn handle_sbi_call(cpu: &mut Cpu, bus: &mut Bus) -> bool {
+    let eid = cpu.regs[17]; // a7
+    let fid = cpu.regs[16]; // a6
+    let a0 = cpu.regs[10];
+    // SBI return: a0 = error, a1 = value
+    // SBI_SUCCESS = 0, SBI_ERR_NOT_SUPPORTED = -2
+
+    match eid {
+        // Legacy SBI extensions (deprecated but Linux still uses them early)
+        0x00 => {
+            // sbi_set_timer (legacy)
+            bus.clint.mtimecmp = a0;
+            // Clear STIP when timer is set
+            let mip = cpu.csrs.read(csr::MIP);
+            cpu.csrs.write(csr::MIP, mip & !(1 << 5));
+            cpu.regs[10] = 0; // success
+            true
+        }
+        0x01 => {
+            // sbi_console_putchar (legacy)
+            let ch = a0 as u8;
+            use std::io::Write;
+            let mut stdout = std::io::stdout().lock();
+            let _ = stdout.write_all(&[ch]);
+            let _ = stdout.flush();
+            cpu.regs[10] = 0;
+            true
+        }
+        0x02 => {
+            // sbi_console_getchar (legacy)
+            // Return -1 if no char available
+            cpu.regs[10] = (-1i64) as u64;
+            true
+        }
+        0x08 => {
+            // sbi_shutdown (legacy)
+            log::info!("SBI shutdown requested");
+            return false; // Let it trap, will cause halt
+        }
+
+        // SBI v0.2+ extensions
+        0x10 => {
+            // Base extension
+            match fid {
+                0 => { // sbi_get_spec_version
+                    cpu.regs[10] = 0; // success
+                    cpu.regs[11] = 2; // SBI spec v0.2
+                    true
+                }
+                1 => { // sbi_get_impl_id
+                    cpu.regs[10] = 0;
+                    cpu.regs[11] = 0xFF; // custom implementation
+                    true
+                }
+                2 => { // sbi_get_impl_version
+                    cpu.regs[10] = 0;
+                    cpu.regs[11] = 1;
+                    true
+                }
+                3 => { // sbi_probe_extension
+                    let ext_id = a0;
+                    let available = matches!(ext_id, 0x00 | 0x01 | 0x02 | 0x10 | 0x54494D45 | 0x735049 | 0x48534D);
+                    cpu.regs[10] = 0;
+                    cpu.regs[11] = if available { 1 } else { 0 };
+                    true
+                }
+                4 => { // sbi_get_mvendorid
+                    cpu.regs[10] = 0;
+                    cpu.regs[11] = 0;
+                    true
+                }
+                5 => { // sbi_get_marchid
+                    cpu.regs[10] = 0;
+                    cpu.regs[11] = 0;
+                    true
+                }
+                6 => { // sbi_get_mimpid
+                    cpu.regs[10] = 0;
+                    cpu.regs[11] = 0;
+                    true
+                }
+                _ => {
+                    cpu.regs[10] = (-2i64) as u64; // SBI_ERR_NOT_SUPPORTED
+                    cpu.regs[11] = 0;
+                    true
+                }
+            }
+        }
+        0x54494D45 => {
+            // Timer extension (TIME)
+            match fid {
+                0 => { // sbi_set_timer
+                    bus.clint.mtimecmp = a0;
+                    let mip = cpu.csrs.read(csr::MIP);
+                    cpu.csrs.write(csr::MIP, mip & !(1 << 5)); // Clear STIP
+                    cpu.regs[10] = 0;
+                    cpu.regs[11] = 0;
+                    true
+                }
+                _ => {
+                    cpu.regs[10] = (-2i64) as u64;
+                    cpu.regs[11] = 0;
+                    true
+                }
+            }
+        }
+        0x735049 => {
+            // sPI (IPI) extension
+            match fid {
+                0 => { // sbi_send_ipi
+                    // Single-hart system, send IPI to self
+                    let mip = cpu.csrs.read(csr::MIP);
+                    cpu.csrs.write(csr::MIP, mip | (1 << 1)); // Set SSIP
+                    cpu.regs[10] = 0;
+                    cpu.regs[11] = 0;
+                    true
+                }
+                _ => {
+                    cpu.regs[10] = (-2i64) as u64;
+                    cpu.regs[11] = 0;
+                    true
+                }
+            }
+        }
+        0x48534D => {
+            // HSM (Hart State Management) extension
+            match fid {
+                0 => { // hart_start — not supported (single hart)
+                    cpu.regs[10] = (-2i64) as u64;
+                    cpu.regs[11] = 0;
+                    true
+                }
+                2 => { // hart_get_status
+                    cpu.regs[10] = 0; // success
+                    cpu.regs[11] = 0; // STARTED
+                    true
+                }
+                _ => {
+                    cpu.regs[10] = (-2i64) as u64;
+                    cpu.regs[11] = 0;
+                    true
+                }
+            }
+        }
+        0x53525354 => {
+            // SRST (System Reset) extension
+            match fid {
+                0 => { // system_reset
+                    log::info!("SBI system reset requested (type={}, reason={})", a0, cpu.regs[11]);
+                    std::process::exit(0);
+                }
+                _ => {
+                    cpu.regs[10] = (-2i64) as u64;
+                    cpu.regs[11] = 0;
+                    true
+                }
+            }
+        }
+        _ => {
+            // Unknown extension — return not supported
+            cpu.regs[10] = (-2i64) as u64;
+            cpu.regs[11] = 0;
+            true
+        }
+    }
 }

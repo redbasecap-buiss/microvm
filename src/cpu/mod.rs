@@ -132,52 +132,40 @@ impl Cpu {
             return;
         }
 
-        // Check if interrupts are enabled for current mode
         let mstatus = self.csrs.read(csr::MSTATUS);
-        let can_interrupt = match self.mode {
-            PrivilegeMode::Machine => (mstatus >> 3) & 1 == 1, // MIE bit
-            PrivilegeMode::Supervisor => true, // M-mode interrupts always preempt S-mode
-            PrivilegeMode::User => true,
-        };
-
-        if !can_interrupt {
-            // Check S-mode delegation
-            let sip = self.csrs.read(csr::SIP);
-            let sie = self.csrs.read(csr::SIE);
-            let s_pending = sip & sie;
-            if s_pending != 0 && self.mode == PrivilegeMode::Supervisor {
-                let sstatus = self.csrs.read(csr::SSTATUS);
-                if (sstatus >> 1) & 1 == 0 {
-                    return; // SIE disabled
-                }
-            } else {
-                return;
-            }
-        }
+        let mideleg = self.csrs.read(csr::MIDELEG);
 
         // Priority: MEI > MSI > MTI > SEI > SSI > STI
-        let interrupt_code = if pending & (1 << 11) != 0 {
-            11 // MEI
-        } else if pending & (1 << 3) != 0 {
-            3 // MSI
-        } else if pending & (1 << 7) != 0 {
-            7 // MTI
-        } else if pending & (1 << 9) != 0 {
-            9 // SEI
-        } else if pending & (1 << 1) != 0 {
-            1 // SSI
-        } else if pending & (1 << 5) != 0 {
-            5 // STI
-        } else {
-            return;
-        };
+        let priorities = [11, 3, 7, 9, 1, 5];
+        for &code in &priorities {
+            if pending & (1 << code) == 0 {
+                continue;
+            }
 
-        // Check delegation to S-mode
-        let mideleg = self.csrs.read(csr::MIDELEG);
-        if (mideleg >> interrupt_code) & 1 == 1 && self.mode != PrivilegeMode::Machine {
-            self.trap_to_smode(interrupt_code, true);
-        } else {
-            self.trap_to_mmode(interrupt_code, true);
+            let delegated = (mideleg >> code) & 1 == 1;
+
+            if delegated && self.mode != PrivilegeMode::Machine {
+                // Delegated to S-mode — check if S-mode can take it
+                let can_take = match self.mode {
+                    PrivilegeMode::Supervisor => (mstatus >> 1) & 1 == 1, // SIE
+                    PrivilegeMode::User => true, // S-mode interrupts always preempt U-mode
+                    _ => false,
+                };
+                if can_take {
+                    self.trap_to_smode(code, true);
+                    return;
+                }
+            } else if !delegated {
+                // M-mode interrupt
+                let can_take = match self.mode {
+                    PrivilegeMode::Machine => (mstatus >> 3) & 1 == 1, // MIE
+                    _ => true, // M-mode interrupts always preempt lower modes
+                };
+                if can_take {
+                    self.trap_to_mmode(code, true);
+                    return;
+                }
+            }
         }
     }
 

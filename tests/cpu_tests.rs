@@ -480,3 +480,201 @@ fn test_boot_rom_generation() {
     let first = u32::from_le_bytes([boot[0], boot[1], boot[2], boot[3]]);
     assert_eq!(first, 0x00000513);
 }
+
+// ============== SBI Call Tests ==============
+
+#[test]
+fn test_sbi_base_get_spec_version() {
+    // Set up CPU in S-mode, make SBI base extension call
+    let mut bus = Bus::new(64 * 1024);
+    let mut cpu = Cpu::new();
+    cpu.reset(DRAM_BASE);
+    // Switch to S-mode by setting up mstatus and using mret
+    // Simpler: directly set mode and registers
+    cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
+    cpu.regs[17] = 0x10; // a7 = Base extension EID
+    cpu.regs[16] = 0;    // a6 = get_spec_version FID
+    // ECALL instruction
+    let ecall = 0x00000073u32;
+    bus.load_binary(&ecall.to_le_bytes(), 0);
+    cpu.step(&mut bus);
+    assert_eq!(cpu.regs[10], 0); // SBI_SUCCESS
+    assert_eq!(cpu.regs[11], 2); // spec version 0.2
+}
+
+#[test]
+fn test_sbi_probe_extension() {
+    let mut bus = Bus::new(64 * 1024);
+    let mut cpu = Cpu::new();
+    cpu.reset(DRAM_BASE);
+    cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
+    cpu.regs[17] = 0x10; // Base extension
+    cpu.regs[16] = 3;    // probe_extension
+    cpu.regs[10] = 0x54494D45; // TIME extension
+    let ecall = 0x00000073u32;
+    bus.load_binary(&ecall.to_le_bytes(), 0);
+    cpu.step(&mut bus);
+    assert_eq!(cpu.regs[10], 0); // success
+    assert_eq!(cpu.regs[11], 1); // available
+}
+
+#[test]
+fn test_sbi_set_timer() {
+    let mut bus = Bus::new(64 * 1024);
+    let mut cpu = Cpu::new();
+    cpu.reset(DRAM_BASE);
+    cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
+    cpu.regs[17] = 0; // legacy set_timer
+    cpu.regs[10] = 999999999; // timer value
+    // Set STIP first to verify it gets cleared
+    cpu.csrs.write(csr::MIP, 1 << 5);
+    let ecall = 0x00000073u32;
+    bus.load_binary(&ecall.to_le_bytes(), 0);
+    cpu.step(&mut bus);
+    assert_eq!(bus.clint.mtimecmp, 999999999);
+    // STIP should be cleared
+    assert_eq!(cpu.csrs.read(csr::MIP) & (1 << 5), 0);
+}
+
+#[test]
+fn test_sbi_console_putchar() {
+    let mut bus = Bus::new(64 * 1024);
+    let mut cpu = Cpu::new();
+    cpu.reset(DRAM_BASE);
+    cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
+    cpu.regs[17] = 1; // legacy console_putchar
+    cpu.regs[10] = b'X' as u64;
+    let ecall = 0x00000073u32;
+    bus.load_binary(&ecall.to_le_bytes(), 0);
+    cpu.step(&mut bus);
+    assert_eq!(cpu.regs[10], 0); // success
+}
+
+#[test]
+fn test_sbi_ipi() {
+    let mut bus = Bus::new(64 * 1024);
+    let mut cpu = Cpu::new();
+    cpu.reset(DRAM_BASE);
+    cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
+    cpu.regs[17] = 0x735049; // sPI extension
+    cpu.regs[16] = 0; // send_ipi
+    let ecall = 0x00000073u32;
+    bus.load_binary(&ecall.to_le_bytes(), 0);
+    cpu.step(&mut bus);
+    assert_eq!(cpu.regs[10], 0); // success
+    // SSIP should be set
+    assert_ne!(cpu.csrs.read(csr::MIP) & (1 << 1), 0);
+}
+
+#[test]
+fn test_sbi_unknown_extension() {
+    let mut bus = Bus::new(64 * 1024);
+    let mut cpu = Cpu::new();
+    cpu.reset(DRAM_BASE);
+    cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
+    cpu.regs[17] = 0xDEAD; // unknown extension
+    let ecall = 0x00000073u32;
+    bus.load_binary(&ecall.to_le_bytes(), 0);
+    cpu.step(&mut bus);
+    assert_eq!(cpu.regs[10] as i64, -2); // SBI_ERR_NOT_SUPPORTED
+}
+
+// ============== PMP CSR Tests ==============
+
+#[test]
+fn test_pmp_csr_read_write() {
+    let mut csrs = csr::CsrFile::new();
+    // Write pmpcfg0
+    csrs.write(0x3A0, 0x1F1F1F1F);
+    assert_eq!(csrs.read(0x3A0), 0x1F1F1F1F);
+    // Write pmpaddr0
+    csrs.write(0x3B0, 0x8000_0000);
+    assert_eq!(csrs.read(0x3B0), 0x8000_0000);
+    // pmpcfg1 should be inaccessible on RV64
+    csrs.write(0x3A1, 0xFFFF);
+    assert_eq!(csrs.read(0x3A1), 0);
+}
+
+// ============== MSTATUS Tests ==============
+
+#[test]
+fn test_mstatus_uxl_sxl() {
+    let csrs = csr::CsrFile::new();
+    let mstatus = csrs.read(csr::MSTATUS);
+    // UXL (bits 33:32) should be 2 (64-bit)
+    assert_eq!((mstatus >> 32) & 3, 2);
+    // SXL (bits 35:34) should be 2 (64-bit)
+    assert_eq!((mstatus >> 34) & 3, 2);
+}
+
+#[test]
+fn test_mstatus_uxl_preserved_on_write() {
+    let mut csrs = csr::CsrFile::new();
+    // Write MSTATUS with different UXL/SXL — should be preserved
+    csrs.write(csr::MSTATUS, 0x0000_0000_0000_0008); // just MIE
+    let mstatus = csrs.read(csr::MSTATUS);
+    assert_eq!((mstatus >> 32) & 3, 2); // UXL still 2
+    assert_eq!((mstatus >> 34) & 3, 2); // SXL still 2
+    assert_eq!(mstatus & (1 << 3), 1 << 3); // MIE set
+}
+
+// ============== TIME CSR Test ==============
+
+#[test]
+fn test_time_csr_reads_mtime() {
+    let mut csrs = csr::CsrFile::new();
+    csrs.mtime = 12345678;
+    assert_eq!(csrs.read(csr::TIME), 12345678);
+}
+
+// ============== SRET Test ==============
+
+#[test]
+fn test_sret() {
+    let mut bus = Bus::new(64 * 1024);
+    let mut cpu = Cpu::new();
+    cpu.reset(DRAM_BASE);
+    // Set up for SRET: in S-mode, return to user address
+    cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
+    cpu.csrs.write(csr::SEPC, 0x80001000);
+    // SPP=0 (return to U-mode), SPIE=1
+    cpu.csrs.write(csr::SSTATUS, (1 << 5)); // SPIE=1
+    let sret = 0x10200073u32;
+    bus.load_binary(&sret.to_le_bytes(), 0);
+    cpu.step(&mut bus);
+    assert_eq!(cpu.pc, 0x80001000);
+    assert_eq!(cpu.mode, microvm::cpu::PrivilegeMode::User);
+}
+
+// ============== Interrupt Delegation Test ==============
+
+#[test]
+fn test_interrupt_delegation_to_smode() {
+    let mut bus = Bus::new(64 * 1024);
+    let mut cpu = Cpu::new();
+    cpu.reset(DRAM_BASE);
+    // Set up: CPU in S-mode, delegate STI to S-mode
+    cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
+    cpu.csrs.write(csr::MIDELEG, 1 << 5); // Delegate STI
+    cpu.csrs.write(csr::MIE, 1 << 5);     // Enable STI in MIE
+    cpu.csrs.write(csr::STVEC, 0x80002000); // S-mode trap handler
+    cpu.csrs.write(csr::MIP, 1 << 5);     // STIP pending
+    // Enable SIE in MSTATUS (bit 1)
+    let mstatus = cpu.csrs.read(csr::MSTATUS);
+    cpu.csrs.write(csr::MSTATUS, mstatus | (1 << 1));
+
+    // NOP at program start and at trap handler (0x80002000 = offset 0x2000)
+    let nop = 0x00000013u32;
+    bus.load_binary(&nop.to_le_bytes(), 0);
+    bus.load_binary(&nop.to_le_bytes(), 0x2000); // trap handler
+
+    cpu.step(&mut bus);
+
+    // SCAUSE should be timer interrupt (delegated to S-mode)
+    let scause = cpu.csrs.read(csr::SCAUSE);
+    assert_eq!(scause, (1u64 << 63) | 5); // Interrupt, STI
+    // SEPC should be the original PC
+    assert_eq!(cpu.csrs.read(csr::SEPC), 0x80000000);
+    // After executing the nop at trap handler, PC should be past it
+    assert_eq!(cpu.pc, 0x80002004);
+}

@@ -80,10 +80,15 @@ impl Vm {
         // Main execution loop
         let mut insn_count: u64 = 0;
         loop {
+            // Update mtime in CSR file for TIME CSR reads
+            self.cpu.csrs.mtime = self.bus.clint.mtime();
+
             // Update timer interrupt
+            // When CLINT timer fires, set both MTIP and STIP (for delegation)
             if self.bus.clint.timer_interrupt() {
                 let mip = self.cpu.csrs.read(csr::MIP);
-                self.cpu.csrs.write(csr::MIP, mip | (1 << 7)); // MTIP
+                // Set MTIP (bit 7) and STIP (bit 5) — SBI clears STIP on set_timer
+                self.cpu.csrs.write(csr::MIP, mip | (1 << 7) | (1 << 5));
             } else {
                 let mip = self.cpu.csrs.read(csr::MIP);
                 self.cpu.csrs.write(csr::MIP, mip & !(1 << 7));
@@ -108,9 +113,13 @@ impl Vm {
                 self.bus.plic.set_pending(8); // VirtIO blk IRQ = 8
             }
 
+            // External interrupts via PLIC → SEIP
             if self.bus.plic.has_interrupt(1) {
                 let mip = self.cpu.csrs.read(csr::MIP);
                 self.cpu.csrs.write(csr::MIP, mip | (1 << 9)); // SEIP
+            } else {
+                let mip = self.cpu.csrs.read(csr::MIP);
+                self.cpu.csrs.write(csr::MIP, mip & !(1 << 9));
             }
 
             if !self.cpu.step(&mut self.bus) {
