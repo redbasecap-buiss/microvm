@@ -30,6 +30,10 @@ enum Commands {
         #[arg(short, long)]
         disk: Option<PathBuf>,
 
+        /// Path to initrd/initramfs image (optional)
+        #[arg(short, long)]
+        initrd: Option<PathBuf>,
+
         /// RAM size in MiB (default: 128)
         #[arg(short, long, default_value = "128")]
         memory: u64,
@@ -64,6 +68,7 @@ fn main() {
         Commands::Run {
             kernel,
             disk,
+            initrd,
             memory: mem_size,
             cpus: _,
             cmdline,
@@ -77,6 +82,7 @@ fn main() {
             let config = vm::VmConfig {
                 kernel_path: kernel,
                 disk_path: disk,
+                initrd_path: initrd,
                 ram_size_mib: mem_size,
                 kernel_cmdline: cmdline,
                 load_addr: addr,

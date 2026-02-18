@@ -169,7 +169,13 @@ impl DtbBuilder {
 }
 
 /// Generate a Device Tree Blob for Linux boot
-pub fn generate_dtb(ram_size: u64, cmdline: &str, has_virtio_blk: bool) -> Vec<u8> {
+/// `initrd_info` is an optional (start, end) pair of physical addresses for the initrd.
+pub fn generate_dtb(
+    ram_size: u64,
+    cmdline: &str,
+    has_virtio_blk: bool,
+    initrd_info: Option<(u64, u64)>,
+) -> Vec<u8> {
     let mut b = DtbBuilder::new();
 
     // Root node
@@ -183,6 +189,10 @@ pub fn generate_dtb(ram_size: u64, cmdline: &str, has_virtio_blk: bool) -> Vec<u
     b.begin_node("chosen");
     b.prop_str("bootargs", cmdline);
     b.prop_str("stdout-path", "/soc/uart@10000000");
+    if let Some((start, end)) = initrd_info {
+        b.prop_u64("linux,initrd-start", start);
+        b.prop_u64("linux,initrd-end", end);
+    }
     b.end_node();
 
     // Memory

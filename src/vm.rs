@@ -9,6 +9,7 @@ use crate::memory::{Bus, DRAM_BASE};
 pub struct VmConfig {
     pub kernel_path: PathBuf,
     pub disk_path: Option<PathBuf>,
+    pub initrd_path: Option<PathBuf>,
     pub ram_size_mib: u64,
     pub kernel_cmdline: String,
     pub load_addr: u64,
@@ -60,9 +61,37 @@ impl Vm {
             }
         }
 
+        // Load initrd if provided
+        let initrd_info = if let Some(ref initrd_path) = self.config.initrd_path {
+            let initrd_data = std::fs::read(initrd_path).unwrap_or_else(|e| {
+                eprintln!("Failed to read initrd: {}", e);
+                std::process::exit(1);
+            });
+            // Place initrd near end of RAM, page-aligned, leaving room for DTB after it
+            let initrd_size = initrd_data.len() as u64;
+            let initrd_end_region = DRAM_BASE + ram_bytes - 0x200000; // Leave 2 MiB for DTB
+            let initrd_start = (initrd_end_region - initrd_size) & !0xFFF; // Page-align
+            self.bus.load_binary(&initrd_data, initrd_start - DRAM_BASE);
+            log::info!(
+                "Loaded initrd: {} ({} bytes) at {:#x}-{:#x}",
+                initrd_path.display(),
+                initrd_data.len(),
+                initrd_start,
+                initrd_start + initrd_size
+            );
+            Some((initrd_start, initrd_start + initrd_size))
+        } else {
+            None
+        };
+
         // Generate and load DTB
         let has_disk = self.config.disk_path.is_some();
-        let dtb_data = dtb::generate_dtb(ram_bytes, &self.config.kernel_cmdline, has_disk);
+        let dtb_data = dtb::generate_dtb(
+            ram_bytes,
+            &self.config.kernel_cmdline,
+            has_disk,
+            initrd_info,
+        );
         // Place DTB at end of RAM (aligned)
         let dtb_addr = DRAM_BASE + ram_bytes - ((dtb_data.len() as u64 + 0xFFF) & !0xFFF);
         let dtb_offset = dtb_addr - DRAM_BASE;
@@ -97,26 +126,16 @@ impl Vm {
             // Update mtime in CSR file for TIME CSR reads
             self.cpu.csrs.mtime = self.bus.clint.mtime();
 
-            // Update timer interrupt
-            // When CLINT timer fires, emulate M-mode firmware behavior:
-            // Convert MTIP to STIP so S-mode kernel receives it via delegation.
-            // Real hardware sets MTIP (bit 7) which M-mode firmware converts to STIP (bit 5).
-            // Since we handle SBI in the emulator, we do this conversion directly.
-            if self.bus.clint.timer_interrupt() {
-                let mip = self.cpu.csrs.read(csr::MIP);
+            // Update timer interrupt — STIP (bit 5)
+            // STIP should be set if EITHER the CLINT timer has fired (SBI legacy path)
+            // OR the Sstc stimecmp has fired. Both sources contribute independently.
+            let clint_timer = self.bus.clint.timer_interrupt();
+            let sstc_timer = self.cpu.csrs.stimecmp_pending();
+            let mip = self.cpu.csrs.read(csr::MIP);
+            if clint_timer || sstc_timer {
                 self.cpu.csrs.write(csr::MIP, mip | (1 << 5)); // Set STIP
-            }
-            // Note: STIP is cleared by SBI set_timer, not here (avoids clearing Sstc's STIP)
-
-            // Sstc extension: stimecmp drives STIP directly
-            if self.cpu.csrs.stimecmp_pending() {
-                let mip = self.cpu.csrs.read(csr::MIP);
-                self.cpu.csrs.write(csr::MIP, mip | (1 << 5)); // STIP
             } else {
-                // Only clear STIP if it was set by stimecmp (not by SBI set_timer)
-                // For simplicity, let stimecmp control STIP entirely when Sstc is used
-                let mip = self.cpu.csrs.read(csr::MIP);
-                self.cpu.csrs.write(csr::MIP, mip & !(1 << 5));
+                self.cpu.csrs.write(csr::MIP, mip & !(1 << 5)); // Clear STIP
             }
 
             // Update software interrupt

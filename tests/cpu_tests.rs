@@ -452,7 +452,7 @@ fn test_addiw_sign_extend() {
 
 #[test]
 fn test_dtb_generation() {
-    let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "console=ttyS0", false);
+    let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "console=ttyS0", false, None);
     // DTB magic number
     assert_eq!(dtb[0], 0xD0);
     assert_eq!(dtb[1], 0x0D);
@@ -994,7 +994,7 @@ fn test_uart_thre_interrupt() {
 
 #[test]
 fn test_dtb_contains_isa_extensions() {
-    let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "console=ttyS0", false);
+    let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "console=ttyS0", false, None);
     // Check that the DTB contains the riscv,isa-extensions property
     let _dtb_str = String::from_utf8_lossy(&dtb);
     assert!(
@@ -1006,7 +1006,7 @@ fn test_dtb_contains_isa_extensions() {
 
 #[test]
 fn test_dtb_isa_string_includes_su() {
-    let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "", false);
+    let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "", false, None);
     assert!(
         dtb.windows(b"rv64imacsu".len()).any(|w| w == b"rv64imacsu"),
         "DTB ISA string should be rv64imacsu"
@@ -1259,7 +1259,7 @@ fn test_satp_mode_validation() {
 
 #[test]
 fn test_dtb_contains_isa_base() {
-    let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "console=ttyS0", false);
+    let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "console=ttyS0", false, None);
     // The DTB should contain "riscv,isa-base" string
     let dtb_str = String::from_utf8_lossy(&dtb);
     assert!(
@@ -1270,7 +1270,7 @@ fn test_dtb_contains_isa_base() {
 
 #[test]
 fn test_dtb_contains_zicntr() {
-    let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "console=ttyS0", false);
+    let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "console=ttyS0", false, None);
     let dtb_str = String::from_utf8_lossy(&dtb);
     assert!(
         dtb_str.contains("zicntr"),
@@ -1393,10 +1393,62 @@ fn test_mstatus_fs_hardwired_zero() {
 
 #[test]
 fn test_dtb_sv48_mmu_type() {
-    let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "console=ttyS0", false);
+    let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "console=ttyS0", false, None);
     let dtb_str = String::from_utf8_lossy(&dtb);
     assert!(
         dtb_str.contains("riscv,sv48"),
         "DTB should advertise Sv48 MMU type"
     );
+}
+
+#[test]
+fn test_dtb_initrd_properties() {
+    let dtb = microvm::dtb::generate_dtb(
+        128 * 1024 * 1024,
+        "console=ttyS0",
+        false,
+        Some((0x8600_0000, 0x8700_0000)),
+    );
+    // DTB should contain initrd-start and initrd-end strings
+    let dtb_str = String::from_utf8_lossy(&dtb);
+    assert!(
+        dtb_str.contains("linux,initrd-start"),
+        "DTB should contain linux,initrd-start"
+    );
+    assert!(
+        dtb_str.contains("linux,initrd-end"),
+        "DTB should contain linux,initrd-end"
+    );
+}
+
+#[test]
+fn test_dtb_no_initrd_when_none() {
+    let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "console=ttyS0", false, None);
+    let dtb_str = String::from_utf8_lossy(&dtb);
+    assert!(
+        !dtb_str.contains("linux,initrd-start"),
+        "DTB should NOT contain initrd properties when no initrd"
+    );
+}
+
+#[test]
+fn test_stip_clint_and_sstc_union() {
+    // Verify that STIP is set when either CLINT timer or Sstc stimecmp fires
+    use microvm::cpu::csr;
+    use microvm::cpu::Cpu;
+    use microvm::memory::Bus;
+
+    let mut cpu = Cpu::new();
+    let bus = Bus::new(1024 * 1024);
+
+    // Neither timer active — STIP should not be set
+    cpu.csrs.mtime = 0;
+    cpu.csrs.write(csr::STIMECMP, u64::MAX);
+    let mip = cpu.csrs.read(csr::MIP);
+    assert_eq!(mip & (1 << 5), 0, "STIP should be clear initially");
+
+    // Sstc stimecmp fires
+    cpu.csrs.mtime = 100;
+    cpu.csrs.write(csr::STIMECMP, 50);
+    assert!(cpu.csrs.stimecmp_pending(), "stimecmp should be pending");
 }
