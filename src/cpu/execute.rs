@@ -363,15 +363,33 @@ fn op_system(cpu: &mut Cpu, bus: &mut Bus, inst: &Instruction, len: u64) -> bool
                 return true;
             }
             _ => {
-                // SFENCE.VMA and other privileged instructions
-                if inst.funct7 == 0x09 {
-                    // SFENCE.VMA — flush TLB (nop for us)
-                    cpu.pc += len;
-                    return true;
+                match inst.funct7 {
+                    0x09 => {
+                        // SFENCE.VMA — flush TLB (nop for us, no TLB cache)
+                        cpu.pc += len;
+                        return true;
+                    }
+                    0x0B => {
+                        // SINVAL.VMA — same as SFENCE.VMA for us (Svinval extension)
+                        cpu.pc += len;
+                        return true;
+                    }
+                    0x0C => {
+                        // SFENCE.W.INVAL — nop (Svinval extension)
+                        cpu.pc += len;
+                        return true;
+                    }
+                    0x0D => {
+                        // SFENCE.INVAL.IR — nop (Svinval extension)
+                        cpu.pc += len;
+                        return true;
+                    }
+                    _ => {
+                        log::warn!("Unknown SYSTEM instruction: {:#010x} at PC={:#x}", inst.raw, cpu.pc);
+                        cpu.handle_exception(2, inst.raw as u64, bus);
+                        return true;
+                    }
                 }
-                log::warn!("Unknown SYSTEM instruction: {:#010x} at PC={:#x}", inst.raw, cpu.pc);
-                cpu.handle_exception(2, inst.raw as u64, bus);
-                return true;
             }
         }
     }
@@ -379,6 +397,12 @@ fn op_system(cpu: &mut Cpu, bus: &mut Bus, inst: &Instruction, len: u64) -> bool
     // CSR instructions
     let csr_addr = (inst.raw >> 20) & 0xFFF;
     let csr_addr = csr_addr as u16;
+
+    // Check CSR privilege level access
+    if !cpu.csrs.check_privilege(csr_addr, cpu.mode) {
+        cpu.handle_exception(2, inst.raw as u64, bus); // Illegal instruction
+        return true;
+    }
 
     // Check counter CSR access permissions
     if matches!(csr_addr, csr::CYCLE | csr::TIME | csr::INSTRET) {
@@ -411,6 +435,11 @@ fn op_system(cpu: &mut Cpu, bus: &mut Bus, inst: &Instruction, len: u64) -> bool
     };
 
     if should_write {
+        // Check if CSR is read-only
+        if cpu.csrs.is_read_only(csr_addr) {
+            cpu.handle_exception(2, inst.raw as u64, bus); // Illegal instruction
+            return true;
+        }
         cpu.csrs.write(csr_addr, write_val);
     }
     cpu.regs[inst.rd] = old_val;
@@ -470,7 +499,8 @@ fn handle_sbi_call(cpu: &mut Cpu, bus: &mut Bus) -> bool {
             match fid {
                 0 => { // sbi_get_spec_version
                     cpu.regs[10] = 0; // success
-                    cpu.regs[11] = 2; // SBI spec v0.2
+                    // SBI spec v2.0: encoding is (major << 24) | minor
+                    cpu.regs[11] = (2u64 << 24) | 0;
                     true
                 }
                 1 => { // sbi_get_impl_id

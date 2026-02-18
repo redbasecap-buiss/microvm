@@ -201,11 +201,12 @@ pub fn generate_dtb(ram_size: u64, cmdline: &str, has_virtio_blk: bool) -> Vec<u
     b.prop_str("device_type", "cpu");
     b.prop_u32("reg", 0);
     b.prop_str("compatible", "riscv");
-    b.prop_str("riscv,isa", "rv64imacsu");
+    b.prop_str("riscv,isa", "rv64imacsu_zicsr_zifencei_sstc");
+    b.prop_str("riscv,isa-base", "rv64i");
     b.prop_str("mmu-type", "riscv,sv39");
     b.prop_str("status", "okay");
     // ISA extensions as stringlist for newer kernels (Linux 6.2+)
-    b.prop_stringlist("riscv,isa-extensions", &["i", "m", "a", "c", "zicsr", "zifencei", "sstc"]);
+    b.prop_stringlist("riscv,isa-extensions", &["i", "m", "a", "c", "zicsr", "zifencei", "sstc", "zicntr"]);
 
     b.begin_node("interrupt-controller");
     b.prop_u32("#interrupt-cells", 1);

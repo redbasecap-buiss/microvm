@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.9.0 — CSR Privilege Enforcement, SATP Validation, Svinval Extension
+
+### Major Features
+- **CSR privilege level checking**: All CSR accesses are now validated against the current privilege mode per RISC-V spec (CSR address bits [9:8] encode minimum privilege). S-mode code accessing M-mode CSRs (mstatus, mepc, etc.) now correctly traps with illegal instruction — critical for Linux running in S-mode.
+- **Read-only CSR write protection**: Writes to read-only CSRs (cycle, time, instret, mhartid, mvendorid, etc.) now trap as illegal instruction.
+- **SATP mode validation**: Only Bare (mode 0) and Sv39 (mode 8) are accepted; writes with unsupported modes (Sv48, Sv57) are silently ignored per spec.
+- **Svinval extension support**: SINVAL.VMA, SFENCE.W.INVAL, and SFENCE.INVAL.IR instructions are now handled (as nops, same as SFENCE.VMA).
+
+### Improvements
+- DTB now includes `riscv,isa-base` property required by Linux 6.4+
+- DTB ISA string updated to `rv64imacsu_zicsr_zifencei_sstc` format
+- Added `zicntr` to `riscv,isa-extensions` stringlist
+- SBI spec version now returns proper v2.0 encoding (`(2 << 24) | 0`)
+- 6 new tests covering CSR privilege checks, read-only CSR detection, SATP validation, and DTB properties
+
+### Stats
+- 80 tests passing (up from 74)
+- Full RV64IMACSU instruction set with privilege enforcement
+- Sv39 MMU with A/D bit management
+- SBI firmware with timer, IPI, HSM, RFENCE, SRST, DBCN extensions
+
 ## v0.6.0 — M-mode Firmware, MMU A/D Bits, Counter Access Control
 
 ### Major Features

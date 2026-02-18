@@ -84,6 +84,22 @@ pub struct CsrFile {
 }
 
 impl CsrFile {
+    /// Check if a CSR is accessible from the given privilege mode.
+    /// RISC-V spec: CSR address bits [9:8] encode the minimum privilege level.
+    /// Returns true if accessible.
+    pub fn check_privilege(&self, csr_addr: u16, mode: PrivilegeMode) -> bool {
+        let required_priv = (csr_addr >> 8) & 3;
+        let current_priv = mode as u16;
+        current_priv >= required_priv
+    }
+
+    /// Check if a CSR is read-only (bits [11:10] == 0b11).
+    pub fn is_read_only(&self, csr_addr: u16) -> bool {
+        (csr_addr >> 10) & 3 == 3
+    }
+}
+
+impl CsrFile {
     pub fn new() -> Self {
         let mut csrs = Self {
             regs: HashMap::new(),
@@ -178,7 +194,9 @@ impl CsrFile {
             // FP CSRs (stub — always 0, FPU not implemented)
             FFLAGS | FRM | FCSR => 0,
             // Environment config CSRs
-            SENVCFG | MENVCFG => self.regs.get(&addr).copied().unwrap_or(0),
+            SENVCFG => self.regs.get(&SENVCFG).copied().unwrap_or(0),
+            MENVCFG => self.regs.get(&MENVCFG).copied().unwrap_or(0),
+            MCOUNTINHIBIT => self.regs.get(&MCOUNTINHIBIT).copied().unwrap_or(0),
             _ => self.regs.get(&addr).copied().unwrap_or(0),
         }
     }
@@ -217,6 +235,14 @@ impl CsrFile {
             0x3A3 => {}
             // PMP address registers
             0x3B0..=0x3BF => self.pmpaddr[(addr - 0x3B0) as usize] = val,
+            SATP => {
+                // Only accept mode 0 (Bare) and 8 (Sv39); ignore writes with unsupported modes
+                let mode = val >> 60;
+                if mode == 0 || mode == 8 {
+                    self.regs.insert(SATP, val);
+                }
+                // Writes with unsupported modes are silently ignored (spec allows this)
+            }
             _ => {
                 self.regs.insert(addr, val);
             }
