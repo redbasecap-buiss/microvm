@@ -16,7 +16,11 @@ impl Ram {
 
     pub fn read8(&self, offset: u64) -> u8 {
         let idx = offset as usize;
-        if idx < self.data.len() { self.data[idx] } else { 0 }
+        if idx < self.data.len() {
+            self.data[idx]
+        } else {
+            0
+        }
     }
 
     pub fn read32(&self, offset: u64) -> u32 {
@@ -53,7 +57,9 @@ impl Ram {
 
     pub fn write8(&mut self, offset: u64, val: u8) {
         let idx = offset as usize;
-        if idx < self.data.len() { self.data[idx] = val; }
+        if idx < self.data.len() {
+            self.data[idx] = val;
+        }
     }
 
     pub fn write32(&mut self, offset: u64, val: u32) {

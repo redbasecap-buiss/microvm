@@ -1,6 +1,5 @@
 /// Device Tree Blob generator for Linux boot
 /// Generates a minimal FDT (Flattened Device Tree) that Linux needs
-
 use crate::memory;
 
 const FDT_MAGIC: u32 = 0xD00DFEED;
@@ -121,9 +120,11 @@ impl DtbBuilder {
         // Check if string already exists
         let needle = s.as_bytes();
         let slen = needle.len();
-        if let Some(pos) = self.strings_buf.windows(slen + 1).position(|w| {
-            w[..slen] == *needle && w[slen] == 0
-        }) {
+        if let Some(pos) = self
+            .strings_buf
+            .windows(slen + 1)
+            .position(|w| w[..slen] == *needle && w[slen] == 0)
+        {
             return pos as u32;
         }
         let off = self.strings_buf.len() as u32;
@@ -153,7 +154,7 @@ impl DtbBuilder {
         dtb.extend_from_slice(&off_mem_rsvmap.to_be_bytes());
         dtb.extend_from_slice(&17u32.to_be_bytes()); // version
         dtb.extend_from_slice(&16u32.to_be_bytes()); // last_comp_version
-        dtb.extend_from_slice(&0u32.to_be_bytes());  // boot_cpuid_phys
+        dtb.extend_from_slice(&0u32.to_be_bytes()); // boot_cpuid_phys
         dtb.extend_from_slice(&(self.strings_buf.len() as u32).to_be_bytes());
         dtb.extend_from_slice(&(self.struct_buf.len() as u32).to_be_bytes());
 
@@ -185,10 +186,15 @@ pub fn generate_dtb(ram_size: u64, cmdline: &str, has_virtio_blk: bool) -> Vec<u
     // Memory
     b.begin_node(&format!("memory@{:x}", memory::DRAM_BASE));
     b.prop_str("device_type", "memory");
-    b.prop_u32_array("reg", &[
-        (memory::DRAM_BASE >> 32) as u32, memory::DRAM_BASE as u32,
-        (ram_size >> 32) as u32, ram_size as u32,
-    ]);
+    b.prop_u32_array(
+        "reg",
+        &[
+            (memory::DRAM_BASE >> 32) as u32,
+            memory::DRAM_BASE as u32,
+            (ram_size >> 32) as u32,
+            ram_size as u32,
+        ],
+    );
     b.end_node();
 
     // CPUs
@@ -206,7 +212,10 @@ pub fn generate_dtb(ram_size: u64, cmdline: &str, has_virtio_blk: bool) -> Vec<u
     b.prop_str("mmu-type", "riscv,sv39");
     b.prop_str("status", "okay");
     // ISA extensions as stringlist for newer kernels (Linux 6.2+)
-    b.prop_stringlist("riscv,isa-extensions", &["i", "m", "a", "c", "zicsr", "zifencei", "sstc", "zicntr"]);
+    b.prop_stringlist(
+        "riscv,isa-extensions",
+        &["i", "m", "a", "c", "zicsr", "zifencei", "sstc", "zicntr"],
+    );
 
     b.begin_node("interrupt-controller");
     b.prop_u32("#interrupt-cells", 1);
@@ -228,20 +237,30 @@ pub fn generate_dtb(ram_size: u64, cmdline: &str, has_virtio_blk: bool) -> Vec<u
     // CLINT
     b.begin_node(&format!("clint@{:x}", memory::CLINT_BASE));
     b.prop_str("compatible", "riscv,clint0");
-    b.prop_u32_array("reg", &[
-        (memory::CLINT_BASE >> 32) as u32, memory::CLINT_BASE as u32,
-        0, memory::CLINT_SIZE as u32,
-    ]);
+    b.prop_u32_array(
+        "reg",
+        &[
+            (memory::CLINT_BASE >> 32) as u32,
+            memory::CLINT_BASE as u32,
+            0,
+            memory::CLINT_SIZE as u32,
+        ],
+    );
     b.prop_u32_array("interrupts-extended", &[1, 3, 1, 7]);
     b.end_node();
 
     // PLIC
     b.begin_node(&format!("plic@{:x}", memory::PLIC_BASE));
     b.prop_str("compatible", "riscv,plic0");
-    b.prop_u32_array("reg", &[
-        (memory::PLIC_BASE >> 32) as u32, memory::PLIC_BASE as u32,
-        0, memory::PLIC_SIZE as u32,
-    ]);
+    b.prop_u32_array(
+        "reg",
+        &[
+            (memory::PLIC_BASE >> 32) as u32,
+            memory::PLIC_BASE as u32,
+            0,
+            memory::PLIC_SIZE as u32,
+        ],
+    );
     b.prop_u32("#interrupt-cells", 1);
     b.prop_null("interrupt-controller");
     b.prop_u32_array("interrupts-extended", &[1, 9, 1, 11]);
@@ -252,10 +271,15 @@ pub fn generate_dtb(ram_size: u64, cmdline: &str, has_virtio_blk: bool) -> Vec<u
     // UART
     b.begin_node(&format!("uart@{:x}", memory::UART_BASE));
     b.prop_str("compatible", "ns16550a");
-    b.prop_u32_array("reg", &[
-        (memory::UART_BASE >> 32) as u32, memory::UART_BASE as u32,
-        0, memory::UART_SIZE as u32,
-    ]);
+    b.prop_u32_array(
+        "reg",
+        &[
+            (memory::UART_BASE >> 32) as u32,
+            memory::UART_BASE as u32,
+            0,
+            memory::UART_SIZE as u32,
+        ],
+    );
     b.prop_u32("clock-frequency", 3686400);
     b.prop_u32_array("interrupts", &[10]);
     b.prop_u32("interrupt-parent", 2);
@@ -265,10 +289,15 @@ pub fn generate_dtb(ram_size: u64, cmdline: &str, has_virtio_blk: bool) -> Vec<u
     if has_virtio_blk {
         b.begin_node(&format!("virtio_mmio@{:x}", memory::VIRTIO0_BASE));
         b.prop_str("compatible", "virtio,mmio");
-        b.prop_u32_array("reg", &[
-            (memory::VIRTIO0_BASE >> 32) as u32, memory::VIRTIO0_BASE as u32,
-            0, memory::VIRTIO0_SIZE as u32,
-        ]);
+        b.prop_u32_array(
+            "reg",
+            &[
+                (memory::VIRTIO0_BASE >> 32) as u32,
+                memory::VIRTIO0_BASE as u32,
+                0,
+                memory::VIRTIO0_SIZE as u32,
+            ],
+        );
         b.prop_u32_array("interrupts", &[8]);
         b.prop_u32("interrupt-parent", 2);
         b.end_node();

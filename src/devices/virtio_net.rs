@@ -3,5 +3,7 @@
 pub struct VirtioNet;
 
 impl VirtioNet {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 }

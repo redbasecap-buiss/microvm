@@ -1,6 +1,6 @@
-use microvm::cpu::Cpu;
 use microvm::cpu::csr;
-use microvm::cpu::decode::{Instruction, expand_compressed};
+use microvm::cpu::decode::{expand_compressed, Instruction};
+use microvm::cpu::Cpu;
 use microvm::memory::{Bus, DRAM_BASE};
 
 /// Helper: create a CPU+Bus, load instructions at DRAM_BASE, run N steps
@@ -209,22 +209,14 @@ fn test_div() {
 
 #[test]
 fn test_div_by_zero() {
-    let program = [
-        0x02A00093u32,
-        0x00000113,
-        0x0220C1B3,
-    ];
+    let program = [0x02A00093u32, 0x00000113, 0x0220C1B3];
     let (cpu, _) = run_program(&program, 3);
     assert_eq!(cpu.regs[3], u64::MAX);
 }
 
 #[test]
 fn test_divu() {
-    let program = [
-        0x02A00093u32,
-        0x00700113,
-        0x0220D1B3,
-    ];
+    let program = [0x02A00093u32, 0x00700113, 0x0220D1B3];
     let (cpu, _) = run_program(&program, 3);
     assert_eq!(cpu.regs[3], 6);
 }
@@ -236,10 +228,10 @@ fn test_csr_misa() {
     let (cpu, _) = run_program(&[0x301020F3u32], 1);
     let misa = cpu.regs[1];
     assert_eq!(misa >> 62, 2);
-    assert_ne!(misa & (1 << 8), 0);  // I
+    assert_ne!(misa & (1 << 8), 0); // I
     assert_ne!(misa & (1 << 12), 0); // M
-    assert_ne!(misa & (1 << 0), 0);  // A
-    assert_ne!(misa & (1 << 2), 0);  // C
+    assert_ne!(misa & (1 << 0), 0); // A
+    assert_ne!(misa & (1 << 2), 0); // C
     assert_ne!(misa & (1 << 18), 0); // S
 }
 
@@ -393,12 +385,12 @@ fn test_fibonacci() {
         0x00100113,    // addi x2, x0, 1     (curr=1)
         0x00A00193,    // addi x3, x0, 10    (counter=10)
         // Loop at offset 0x0C:
-        0x00208233,    // add x4, x1, x2     (temp = prev+curr)
-        0x00010093,    // addi x1, x2, 0     (prev = curr)
-        0x00020113,    // addi x2, x4, 0     (curr = temp)
-        0xFFF18193,    // addi x3, x3, -1    (counter--)
+        0x00208233, // add x4, x1, x2     (temp = prev+curr)
+        0x00010093, // addi x1, x2, 0     (prev = curr)
+        0x00020113, // addi x2, x4, 0     (curr = temp)
+        0xFFF18193, // addi x3, x3, -1    (counter--)
         // bne x3, x0, -16 (back to offset 0x0C from offset 0x1C)
-        0xFE0198E3,    // bne x3, x0, -16
+        0xFE0198E3, // bne x3, x0, -16
     ];
     let (cpu, _) = run_program(&program, 100);
     assert_eq!(cpu.regs[2], 89);
@@ -429,7 +421,7 @@ fn test_mtvec_and_trap() {
         0x00A00213,    // addi x4, x0, 10      (marker)
         0x00000073,    // ecall → traps to DRAM_BASE+20
         // Handler at offset 20:
-        0x00B00293,    // addi x5, x0, 11      (handler marker)
+        0x00B00293, // addi x5, x0, 11      (handler marker)
     ];
     let (cpu, _) = run_program(&program, 6);
     assert_eq!(cpu.regs[4], 10);
@@ -477,8 +469,9 @@ fn test_boot_rom_generation() {
     // Should generate valid RISC-V instructions (firmware is now larger due to setup)
     assert!(boot.len() >= 40); // Many instructions for PMP, delegation, counteren, etc.
     assert_eq!(boot.len() % 4, 0); // All 4-byte aligned
-    // MRET (0x30200073) should be present in the boot code
-    let instrs: Vec<u32> = boot.chunks(4)
+                                   // MRET (0x30200073) should be present in the boot code
+    let instrs: Vec<u32> = boot
+        .chunks(4)
         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
     assert!(instrs.contains(&0x30200073), "Boot ROM should contain MRET");
@@ -496,8 +489,8 @@ fn test_sbi_base_get_spec_version() {
     // Simpler: directly set mode and registers
     cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
     cpu.regs[17] = 0x10; // a7 = Base extension EID
-    cpu.regs[16] = 0;    // a6 = get_spec_version FID
-    // ECALL instruction
+    cpu.regs[16] = 0; // a6 = get_spec_version FID
+                      // ECALL instruction
     let ecall = 0x00000073u32;
     bus.load_binary(&ecall.to_le_bytes(), 0);
     cpu.step(&mut bus);
@@ -512,7 +505,7 @@ fn test_sbi_probe_extension() {
     cpu.reset(DRAM_BASE);
     cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
     cpu.regs[17] = 0x10; // Base extension
-    cpu.regs[16] = 3;    // probe_extension
+    cpu.regs[16] = 3; // probe_extension
     cpu.regs[10] = 0x54494D45; // TIME extension
     let ecall = 0x00000073u32;
     bus.load_binary(&ecall.to_le_bytes(), 0);
@@ -529,7 +522,7 @@ fn test_sbi_set_timer() {
     cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
     cpu.regs[17] = 0; // legacy set_timer
     cpu.regs[10] = 999999999; // timer value
-    // Set STIP first to verify it gets cleared
+                              // Set STIP first to verify it gets cleared
     cpu.csrs.write(csr::MIP, 1 << 5);
     let ecall = 0x00000073u32;
     bus.load_binary(&ecall.to_le_bytes(), 0);
@@ -565,7 +558,7 @@ fn test_sbi_ipi() {
     bus.load_binary(&ecall.to_le_bytes(), 0);
     cpu.step(&mut bus);
     assert_eq!(cpu.regs[10], 0); // success
-    // SSIP should be set
+                                 // SSIP should be set
     assert_ne!(cpu.csrs.read(csr::MIP) & (1 << 1), 0);
 }
 
@@ -659,10 +652,10 @@ fn test_interrupt_delegation_to_smode() {
     // Set up: CPU in S-mode, delegate STI to S-mode
     cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
     cpu.csrs.write(csr::MIDELEG, 1 << 5); // Delegate STI
-    cpu.csrs.write(csr::MIE, 1 << 5);     // Enable STI in MIE
+    cpu.csrs.write(csr::MIE, 1 << 5); // Enable STI in MIE
     cpu.csrs.write(csr::STVEC, 0x80002000); // S-mode trap handler
-    cpu.csrs.write(csr::MIP, 1 << 5);     // STIP pending
-    // Enable SIE in MSTATUS (bit 1)
+    cpu.csrs.write(csr::MIP, 1 << 5); // STIP pending
+                                      // Enable SIE in MSTATUS (bit 1)
     let mstatus = cpu.csrs.read(csr::MSTATUS);
     cpu.csrs.write(csr::MSTATUS, mstatus | (1 << 1));
 
@@ -676,7 +669,7 @@ fn test_interrupt_delegation_to_smode() {
     // SCAUSE should be timer interrupt (delegated to S-mode)
     let scause = cpu.csrs.read(csr::SCAUSE);
     assert_eq!(scause, (1u64 << 63) | 5); // Interrupt, STI
-    // SEPC should be the original PC
+                                          // SEPC should be the original PC
     assert_eq!(cpu.csrs.read(csr::SEPC), 0x80000000);
     // After executing the nop at trap handler, PC should be past it
     assert_eq!(cpu.pc, 0x80002004);
@@ -723,14 +716,23 @@ fn test_mmu_ad_bits_set_on_read() {
     cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
 
     // Do a read translation
-    let result = cpu.mmu.translate(0x0, microvm::cpu::mmu::AccessType::Read,
-        cpu.mode, &cpu.csrs, &mut bus);
+    let result = cpu.mmu.translate(
+        0x0,
+        microvm::cpu::mmu::AccessType::Read,
+        cpu.mode,
+        &cpu.csrs,
+        &mut bus,
+    );
     assert!(result.is_ok());
 
     // Check that A bit was set
     let pte_after = bus.read64(DRAM_BASE + l0_base);
     assert_ne!(pte_after & (1 << 6), 0, "A bit should be set after read");
-    assert_eq!(pte_after & (1 << 7), 0, "D bit should NOT be set after read");
+    assert_eq!(
+        pte_after & (1 << 7),
+        0,
+        "D bit should NOT be set after read"
+    );
 }
 
 #[test]
@@ -760,8 +762,13 @@ fn test_mmu_ad_bits_set_on_write() {
     cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
 
     // Do a write translation
-    let result = cpu.mmu.translate(0x1000, microvm::cpu::mmu::AccessType::Write,
-        cpu.mode, &cpu.csrs, &mut bus);
+    let result = cpu.mmu.translate(
+        0x1000,
+        microvm::cpu::mmu::AccessType::Write,
+        cpu.mode,
+        &cpu.csrs,
+        &mut bus,
+    );
     assert!(result.is_ok());
 
     // Check that both A and D bits were set
@@ -797,7 +804,10 @@ fn test_counter_access_denied_without_counteren() {
 
     // Should have trapped with illegal instruction
     let mcause = cpu.csrs.read(csr::MCAUSE);
-    assert_eq!(mcause, 2, "Should trap with illegal instruction when counter access denied");
+    assert_eq!(
+        mcause, 2,
+        "Should trap with illegal instruction when counter access denied"
+    );
 }
 
 #[test]
@@ -851,8 +861,11 @@ fn test_firmware_boot_drops_to_smode() {
     }
 
     // Verify we reached S-mode at kernel entry
-    assert_eq!(cpu.mode, microvm::cpu::PrivilegeMode::Supervisor,
-        "Should be in S-mode after MRET");
+    assert_eq!(
+        cpu.mode,
+        microvm::cpu::PrivilegeMode::Supervisor,
+        "Should be in S-mode after MRET"
+    );
 
     // Verify a0 = 0 (hartid)
     assert_eq!(cpu.regs[10], 0, "a0 should be hartid=0");
@@ -885,14 +898,14 @@ fn test_sbi_rfence_remote_fence_i() {
         // Set a7 = 0x52464E43 (RFENCE EID)
         // lui a7, 0x52465 → upper 20 bits
         0x524658B7u32, // lui a7, 0x52465
-        // addi a7, a7, 0x43 (but we need 0x52464F43... let me recalc)
-        // 0x52464E43: upper20 = 0x52465 (with rounding for addi sign), lo12 = 0xE43
-        // Actually: 0x52465000 - 0x52464E43 = 0x1BD → not right
-        // 0x52464E43 = 0x52465 << 12 | 0xFFFFFFFFFFFFE43  hmm
-        // Let's do: lui = (0x52464E43 + 0x800) >> 12 = 0x52465, lo = 0xE43 - 0x1000 = -0x1BD? No.
-        // 0x52464E43: hi = 0x52464E43 >> 12 = 0x52464E, lo = 0x443
-        // But LUI loads upper 20 bits: lui = 0x52465, addi = 0xFFFFFE43 sign-ext = -0x1BD
-        // 0x52465000 + (-0x1BD) = 0x52464E43. Yes!
+                       // addi a7, a7, 0x43 (but we need 0x52464F43... let me recalc)
+                       // 0x52464E43: upper20 = 0x52465 (with rounding for addi sign), lo12 = 0xE43
+                       // Actually: 0x52465000 - 0x52464E43 = 0x1BD → not right
+                       // 0x52464E43 = 0x52465 << 12 | 0xFFFFFFFFFFFFE43  hmm
+                       // Let's do: lui = (0x52464E43 + 0x800) >> 12 = 0x52465, lo = 0xE43 - 0x1000 = -0x1BD? No.
+                       // 0x52464E43: hi = 0x52464E43 >> 12 = 0x52464E, lo = 0x443
+                       // But LUI loads upper 20 bits: lui = 0x52465, addi = 0xFFFFFE43 sign-ext = -0x1BD
+                       // 0x52465000 + (-0x1BD) = 0x52464E43. Yes!
     ];
     // This is complex to set up in raw instructions. Let me use a simpler approach
     // with the helper. Set registers directly before stepping.
@@ -905,15 +918,18 @@ fn test_sbi_rfence_remote_fence_i() {
     cpu.reset(DRAM_BASE);
     cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
     cpu.regs[17] = 0x52464E43; // a7 = RFENCE EID
-    cpu.regs[16] = 0;          // a6 = remote_fence_i (FID 0)
-    cpu.regs[10] = 0;          // a0 = hart_mask
+    cpu.regs[16] = 0; // a6 = remote_fence_i (FID 0)
+    cpu.regs[10] = 0; // a0 = hart_mask
 
     // Set up mtvec so the SBI handler can work (boot ROM sets this, we simulate)
     // We need the SBI call to be handled in execute.rs handle_sbi_call
     cpu.step(&mut bus);
 
     // Should return SBI_SUCCESS (0) in a0
-    assert_eq!(cpu.regs[10], 0, "RFENCE remote_fence_i should return SBI_SUCCESS");
+    assert_eq!(
+        cpu.regs[10], 0,
+        "RFENCE remote_fence_i should return SBI_SUCCESS"
+    );
 }
 
 #[test]
@@ -926,11 +942,14 @@ fn test_sbi_rfence_remote_sfence_vma() {
     cpu.reset(DRAM_BASE);
     cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
     cpu.regs[17] = 0x52464E43; // a7 = RFENCE EID
-    cpu.regs[16] = 1;          // a6 = remote_sfence_vma (FID 1)
+    cpu.regs[16] = 1; // a6 = remote_sfence_vma (FID 1)
 
     cpu.step(&mut bus);
 
-    assert_eq!(cpu.regs[10], 0, "RFENCE remote_sfence_vma should return SBI_SUCCESS");
+    assert_eq!(
+        cpu.regs[10], 0,
+        "RFENCE remote_sfence_vma should return SBI_SUCCESS"
+    );
 }
 
 #[test]
@@ -942,8 +961,8 @@ fn test_sbi_probe_rfence() {
     let mut cpu = Cpu::new();
     cpu.reset(DRAM_BASE);
     cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
-    cpu.regs[17] = 0x10;       // a7 = Base extension
-    cpu.regs[16] = 3;          // a6 = sbi_probe_extension
+    cpu.regs[17] = 0x10; // a7 = Base extension
+    cpu.regs[16] = 3; // a6 = sbi_probe_extension
     cpu.regs[10] = 0x52464E43; // a0 = probe RFENCE
 
     cpu.step(&mut bus);
@@ -961,8 +980,8 @@ fn test_sbi_probe_srst() {
     let mut cpu = Cpu::new();
     cpu.reset(DRAM_BASE);
     cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
-    cpu.regs[17] = 0x10;       // a7 = Base extension
-    cpu.regs[16] = 3;          // a6 = sbi_probe_extension
+    cpu.regs[17] = 0x10; // a7 = Base extension
+    cpu.regs[16] = 3; // a6 = sbi_probe_extension
     cpu.regs[10] = 0x53525354; // a0 = probe SRST
 
     cpu.step(&mut bus);
@@ -978,8 +997,11 @@ fn test_uart_thre_interrupt() {
     let mut uart = microvm::devices::uart::Uart::new();
     // Enable THRE interrupt
     uart.write(1, 0x02); // IER = THRE
-    // UART starts with THRE set, so interrupt should be pending
-    assert!(uart.has_interrupt(), "THRE interrupt should be pending when TX is empty and IER_THRE set");
+                         // UART starts with THRE set, so interrupt should be pending
+    assert!(
+        uart.has_interrupt(),
+        "THRE interrupt should be pending when TX is empty and IER_THRE set"
+    );
 }
 
 // ============== DTB Generation ==============
@@ -989,15 +1011,20 @@ fn test_dtb_contains_isa_extensions() {
     let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "console=ttyS0", false);
     // Check that the DTB contains the riscv,isa-extensions property
     let dtb_str = String::from_utf8_lossy(&dtb);
-    assert!(dtb.windows(b"riscv,isa-extensions".len()).any(|w| w == b"riscv,isa-extensions"),
-        "DTB should contain riscv,isa-extensions property");
+    assert!(
+        dtb.windows(b"riscv,isa-extensions".len())
+            .any(|w| w == b"riscv,isa-extensions"),
+        "DTB should contain riscv,isa-extensions property"
+    );
 }
 
 #[test]
 fn test_dtb_isa_string_includes_su() {
     let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "", false);
-    assert!(dtb.windows(b"rv64imacsu".len()).any(|w| w == b"rv64imacsu"),
-        "DTB ISA string should be rv64imacsu");
+    assert!(
+        dtb.windows(b"rv64imacsu".len()).any(|w| w == b"rv64imacsu"),
+        "DTB ISA string should be rv64imacsu"
+    );
 }
 
 // ============== FP CSR Stubs ==============
@@ -1073,7 +1100,7 @@ fn test_sbi_probe_dbcn() {
     cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
     // sbi_probe_extension(0x4442434E): a7=0x10, a6=3, a0=0x4442434E
     cpu.regs[17] = 0x10; // EID = base
-    cpu.regs[16] = 3;    // FID = probe_extension
+    cpu.regs[16] = 3; // FID = probe_extension
     cpu.regs[10] = 0x4442434E; // DBCN extension ID
     cpu.step(&mut bus);
     assert_eq!(cpu.regs[10], 0, "SBI probe should succeed");
@@ -1089,17 +1116,17 @@ fn test_plic_claim_complete() {
     plic.write(0x000028, 1); // priority[10] = 1
     plic.write(0x002080, 0xFFFFFFFF); // enable all for context 1
     plic.set_pending(10);
-    
+
     // Should have interrupt
     assert!(plic.has_interrupt(1));
-    
+
     // Claim should return IRQ 10
     let claimed = plic.read(0x201004);
     assert_eq!(claimed, 10);
-    
+
     // After claim, pending should be cleared — no more interrupt
     assert!(!plic.has_interrupt(1));
-    
+
     // Complete the interrupt
     plic.write(0x201004, 10);
 }
@@ -1109,21 +1136,29 @@ fn test_plic_claim_complete() {
 #[test]
 fn test_boot_rom_sets_mtvec() {
     let code = microvm::memory::rom::BootRom::generate(0x80200000, 0x87F00000);
-    let instrs: Vec<u32> = code.chunks(4)
+    let instrs: Vec<u32> = code
+        .chunks(4)
         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
     // Should contain csrw mtvec (0x305xxxxx pattern)
-    assert!(instrs.iter().any(|&i| i == 0x30529073), "Boot ROM should set mtvec");
+    assert!(
+        instrs.iter().any(|&i| i == 0x30529073),
+        "Boot ROM should set mtvec"
+    );
 }
 
 #[test]
 fn test_boot_rom_sets_menvcfg() {
     let code = microvm::memory::rom::BootRom::generate(0x80200000, 0x87F00000);
-    let instrs: Vec<u32> = code.chunks(4)
+    let instrs: Vec<u32> = code
+        .chunks(4)
         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
     // Should contain csrw menvcfg (0x30A29073)
-    assert!(instrs.contains(&0x30A29073), "Boot ROM should set menvcfg for Sstc");
+    assert!(
+        instrs.contains(&0x30A29073),
+        "Boot ROM should set menvcfg for Sstc"
+    );
 }
 
 // ============== CSR Privilege Level Checking ==============
@@ -1155,16 +1190,16 @@ fn test_csr_read_only_check() {
     let csrs = microvm::cpu::csr::CsrFile::new();
 
     // Read-only CSRs: bits [11:10] == 0b11
-    assert!(csrs.is_read_only(csr::CYCLE));    // 0xC00
-    assert!(csrs.is_read_only(csr::TIME));     // 0xC01
-    assert!(csrs.is_read_only(csr::INSTRET));  // 0xC02
-    assert!(csrs.is_read_only(csr::MHARTID));  // 0xF14
+    assert!(csrs.is_read_only(csr::CYCLE)); // 0xC00
+    assert!(csrs.is_read_only(csr::TIME)); // 0xC01
+    assert!(csrs.is_read_only(csr::INSTRET)); // 0xC02
+    assert!(csrs.is_read_only(csr::MHARTID)); // 0xF14
     assert!(csrs.is_read_only(csr::MVENDORID)); // 0xF11
 
     // Read-write CSRs
     assert!(!csrs.is_read_only(csr::MSTATUS)); // 0x300
     assert!(!csrs.is_read_only(csr::SSTATUS)); // 0x100
-    assert!(!csrs.is_read_only(csr::SATP));    // 0x180
+    assert!(!csrs.is_read_only(csr::SATP)); // 0x180
 }
 
 #[test]
@@ -1182,22 +1217,19 @@ fn test_smode_cannot_access_mmode_csr() {
         0x00000297u32, // auipc t0, 0 → t0 = DRAM_BASE
         0x03028293,    // addi t0, t0, 48 → t0 = DRAM_BASE+48
         0x10529073,    // csrw stvec, t0
-
         // Inst 3: Delegate illegal instruction (cause 2) to S-mode
-        0x00400293,    // addi t0, zero, 4 (1 << 2)
-        0x30229073,    // csrw medeleg, t0
-
+        0x00400293, // addi t0, zero, 4 (1 << 2)
+        0x30229073, // csrw medeleg, t0
         // Inst 5: Set mepc = DRAM_BASE+0x28 (inst 10, the S-mode code)
-        0x00000297,    // auipc t0, 0 → DRAM_BASE+20
-        0x01428293,    // addi t0, t0, 20 → DRAM_BASE+40
-        0x34129073,    // csrw mepc, t0
-
+        0x00000297, // auipc t0, 0 → DRAM_BASE+20
+        0x01428293, // addi t0, t0, 20 → DRAM_BASE+40
+        0x34129073, // csrw mepc, t0
         // Inst 8: Set mstatus MPP=S (bit 11)
-        0x00080037,    // lui zero, 0x80... no. li t1, 0x800
-        0x00000313,    // addi t1, zero, 0 → clear t1 first
-        // Actually: mstatus already has SXL/UXL set. We just need MPP=01.
-        // csrr t0, mstatus; set bit 11, clear bit 12; csrw mstatus, t0
-        // Simpler: use the boot ROM approach
+        0x00080037, // lui zero, 0x80... no. li t1, 0x800
+        0x00000313, // addi t1, zero, 0 → clear t1 first
+                    // Actually: mstatus already has SXL/UXL set. We just need MPP=01.
+                    // csrr t0, mstatus; set bit 11, clear bit 12; csrw mstatus, t0
+                    // Simpler: use the boot ROM approach
     ];
 
     // This is getting complex with manual encoding. Let's just test the CSR check directly:
@@ -1240,12 +1272,18 @@ fn test_dtb_contains_isa_base() {
     let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "console=ttyS0", false);
     // The DTB should contain "riscv,isa-base" string
     let dtb_str = String::from_utf8_lossy(&dtb);
-    assert!(dtb_str.contains("riscv,isa-base"), "DTB should contain riscv,isa-base property");
+    assert!(
+        dtb_str.contains("riscv,isa-base"),
+        "DTB should contain riscv,isa-base property"
+    );
 }
 
 #[test]
 fn test_dtb_contains_zicntr() {
     let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "console=ttyS0", false);
     let dtb_str = String::from_utf8_lossy(&dtb);
-    assert!(dtb_str.contains("zicntr"), "DTB should advertise zicntr extension");
+    assert!(
+        dtb_str.contains("zicntr"),
+        "DTB should advertise zicntr extension"
+    );
 }

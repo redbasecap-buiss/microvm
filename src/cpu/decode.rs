@@ -117,41 +117,42 @@ pub fn expand_compressed(inst: u32) -> u32 {
     }
 }
 
-fn c_rd_prime(inst: u32) -> u32 { ((inst >> 2) & 0x7) + 8 }
-fn c_rs1_prime(inst: u32) -> u32 { ((inst >> 7) & 0x7) + 8 }
+fn c_rd_prime(inst: u32) -> u32 {
+    ((inst >> 2) & 0x7) + 8
+}
+fn c_rs1_prime(inst: u32) -> u32 {
+    ((inst >> 7) & 0x7) + 8
+}
 
 fn expand_c_addi4spn(inst: u32) -> u32 {
     let nzuimm = ((inst >> 6) & 0x1) << 2
         | ((inst >> 5) & 0x1) << 3
         | ((inst >> 11) & 0x3) << 4
         | ((inst >> 7) & 0xF) << 6;
-    if nzuimm == 0 { return 0; }
+    if nzuimm == 0 {
+        return 0;
+    }
     let rd = c_rd_prime(inst);
     // ADDI rd', x2, nzuimm
     (nzuimm << 20) | (2 << 15) | (0 << 12) | (rd << 7) | 0x13
 }
 
 fn expand_c_lw(inst: u32) -> u32 {
-    let offset = ((inst >> 6) & 0x1) << 2
-        | ((inst >> 10) & 0x7) << 3
-        | ((inst >> 5) & 0x1) << 6;
+    let offset = ((inst >> 6) & 0x1) << 2 | ((inst >> 10) & 0x7) << 3 | ((inst >> 5) & 0x1) << 6;
     let rs1 = c_rs1_prime(inst);
     let rd = c_rd_prime(inst);
     (offset << 20) | (rs1 << 15) | (2 << 12) | (rd << 7) | 0x03
 }
 
 fn expand_c_ld(inst: u32) -> u32 {
-    let offset = ((inst >> 10) & 0x7) << 3
-        | ((inst >> 5) & 0x3) << 6;
+    let offset = ((inst >> 10) & 0x7) << 3 | ((inst >> 5) & 0x3) << 6;
     let rs1 = c_rs1_prime(inst);
     let rd = c_rd_prime(inst);
     (offset << 20) | (rs1 << 15) | (3 << 12) | (rd << 7) | 0x03
 }
 
 fn expand_c_sw(inst: u32) -> u32 {
-    let offset = ((inst >> 6) & 0x1) << 2
-        | ((inst >> 10) & 0x7) << 3
-        | ((inst >> 5) & 0x1) << 6;
+    let offset = ((inst >> 6) & 0x1) << 2 | ((inst >> 10) & 0x7) << 3 | ((inst >> 5) & 0x1) << 6;
     let rs1 = c_rs1_prime(inst);
     let rs2 = c_rd_prime(inst);
     let imm11_5 = (offset >> 5) & 0x7F;
@@ -160,8 +161,7 @@ fn expand_c_sw(inst: u32) -> u32 {
 }
 
 fn expand_c_sd(inst: u32) -> u32 {
-    let offset = ((inst >> 10) & 0x7) << 3
-        | ((inst >> 5) & 0x3) << 6;
+    let offset = ((inst >> 10) & 0x7) << 3 | ((inst >> 5) & 0x3) << 6;
     let rs1 = c_rs1_prime(inst);
     let rs2 = c_rd_prime(inst);
     let imm11_5 = (offset >> 5) & 0x7F;
@@ -213,15 +213,18 @@ fn expand_c_alu(inst: u32) -> u32 {
     let rs2 = c_rd_prime(inst);
 
     match funct2 {
-        0 => { // C.SRLI
+        0 => {
+            // C.SRLI
             let shamt = (((inst >> 12) & 0x1) << 5) | ((inst >> 2) & 0x1F);
             (shamt << 20) | (rd << 15) | (5 << 12) | (rd << 7) | 0x13
         }
-        1 => { // C.SRAI
+        1 => {
+            // C.SRAI
             let shamt = (((inst >> 12) & 0x1) << 5) | ((inst >> 2) & 0x1F);
             (0x20 << 25) | (shamt << 20) | (rd << 15) | (5 << 12) | (rd << 7) | 0x13
         }
-        2 => { // C.ANDI
+        2 => {
+            // C.ANDI
             let imm = (((inst >> 12) & 0x1) << 5) | ((inst >> 2) & 0x1F);
             let imm = ((imm as i32) << 26 >> 26) as u32;
             ((imm & 0xFFF) << 20) | (rd << 15) | (7 << 12) | (rd << 7) | 0x13
@@ -273,7 +276,14 @@ fn expand_c_beqz(inst: u32) -> u32 {
     let b11 = (imm >> 11) & 1;
     let b10_5 = (imm >> 5) & 0x3F;
     let b4_1 = (imm >> 1) & 0xF;
-    (b12 << 31) | (b10_5 << 25) | (0 << 20) | (rs1 << 15) | (0 << 12) | (b4_1 << 8) | (b11 << 7) | 0x63
+    (b12 << 31)
+        | (b10_5 << 25)
+        | (0 << 20)
+        | (rs1 << 15)
+        | (0 << 12)
+        | (b4_1 << 8)
+        | (b11 << 7)
+        | 0x63
 }
 
 fn expand_c_bnez(inst: u32) -> u32 {
@@ -288,7 +298,14 @@ fn expand_c_bnez(inst: u32) -> u32 {
     let b11 = (imm >> 11) & 1;
     let b10_5 = (imm >> 5) & 0x3F;
     let b4_1 = (imm >> 1) & 0xF;
-    (b12 << 31) | (b10_5 << 25) | (0 << 20) | (rs1 << 15) | (1 << 12) | (b4_1 << 8) | (b11 << 7) | 0x63
+    (b12 << 31)
+        | (b10_5 << 25)
+        | (0 << 20)
+        | (rs1 << 15)
+        | (1 << 12)
+        | (b4_1 << 8)
+        | (b11 << 7)
+        | 0x63
 }
 
 fn expand_c_slli(inst: u32) -> u32 {
@@ -299,17 +316,15 @@ fn expand_c_slli(inst: u32) -> u32 {
 
 fn expand_c_lwsp(inst: u32) -> u32 {
     let rd = (inst >> 7) & 0x1F;
-    let offset = (((inst >> 12) & 0x1) << 5)
-        | (((inst >> 4) & 0x7) << 2)
-        | (((inst >> 2) & 0x3) << 6);
+    let offset =
+        (((inst >> 12) & 0x1) << 5) | (((inst >> 4) & 0x7) << 2) | (((inst >> 2) & 0x3) << 6);
     (offset << 20) | (2 << 15) | (2 << 12) | (rd << 7) | 0x03
 }
 
 fn expand_c_ldsp(inst: u32) -> u32 {
     let rd = (inst >> 7) & 0x1F;
-    let offset = (((inst >> 12) & 0x1) << 5)
-        | (((inst >> 5) & 0x3) << 3)
-        | (((inst >> 2) & 0x7) << 6);
+    let offset =
+        (((inst >> 12) & 0x1) << 5) | (((inst >> 5) & 0x3) << 3) | (((inst >> 2) & 0x7) << 6);
     (offset << 20) | (2 << 15) | (3 << 12) | (rd << 7) | 0x03
 }
 

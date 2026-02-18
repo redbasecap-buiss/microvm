@@ -33,7 +33,9 @@ impl Plic {
 
     /// Check if there's a pending interrupt for given context
     pub fn has_interrupt(&self, context: usize) -> bool {
-        if context >= 2 { return false; }
+        if context >= 2 {
+            return false;
+        }
         let enabled_pending = self.pending & self.enable[context];
         for i in 1..64 {
             if enabled_pending & (1 << i) != 0 && self.priority[i] > self.threshold[context] {
@@ -48,7 +50,11 @@ impl Plic {
             // Priority registers: 0x000000 - 0x000FFF
             0x000000..=0x0000FF => {
                 let src = (offset / 4) as usize;
-                if src < 64 { self.priority[src] as u64 } else { 0 }
+                if src < 64 {
+                    self.priority[src] as u64
+                } else {
+                    0
+                }
             }
             // Pending bits
             0x001000 => self.pending & 0xFFFFFFFF,
@@ -77,7 +83,10 @@ impl Plic {
         let mut best_irq = 0u32;
         let mut best_prio = 0u32;
         for i in 1..64usize {
-            if enabled_pending & (1 << i) != 0 && self.priority[i] > best_prio && self.priority[i] > self.threshold[context] {
+            if enabled_pending & (1 << i) != 0
+                && self.priority[i] > best_prio
+                && self.priority[i] > self.threshold[context]
+            {
                 best_irq = i as u32;
                 best_prio = self.priority[i];
             }
@@ -100,7 +109,9 @@ impl Plic {
         match offset {
             0x000000..=0x0000FF => {
                 let src = (offset / 4) as usize;
-                if src < 64 { self.priority[src] = val as u32; }
+                if src < 64 {
+                    self.priority[src] = val as u32;
+                }
             }
             0x002000 => self.enable[0] = (self.enable[0] & !0xFFFFFFFF) | (val & 0xFFFFFFFF),
             0x002004 => self.enable[0] = (self.enable[0] & 0xFFFFFFFF) | ((val & 0xFFFFFFFF) << 32),

@@ -3,7 +3,6 @@
 /// Implements the VirtIO over MMIO transport with a block device backend.
 /// Reference: VirtIO spec v1.1, sections 2 (basic facilities), 4.2 (MMIO),
 /// and 5.2 (block device).
-
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -127,8 +126,12 @@ impl VirtioBlk {
         let size = file.metadata()?.len();
         self.disk_size = size;
         self.disk = Some(file);
-        log::info!("VirtIO block: attached {} ({} bytes, {} sectors)",
-            path.display(), size, size / SECTOR_SIZE);
+        log::info!(
+            "VirtIO block: attached {} ({} bytes, {} sectors)",
+            path.display(),
+            size,
+            size / SECTOR_SIZE
+        );
         Ok(())
     }
 
@@ -153,9 +156,13 @@ impl VirtioBlk {
     pub fn read(&self, offset: u64) -> u64 {
         match offset {
             MAGIC_VALUE => 0x74726976, // "virt" in little-endian
-            VERSION => 2, // VirtIO MMIO v2
+            VERSION => 2,              // VirtIO MMIO v2
             DEVICE_ID => {
-                if self.disk.is_some() { 2 } else { 0 } // 2 = block device
+                if self.disk.is_some() {
+                    2
+                } else {
+                    0
+                } // 2 = block device
             }
             VENDOR_ID => 0x554D4551, // "QEMU" (compatible)
             DEVICE_FEATURES => {
@@ -173,7 +180,11 @@ impl VirtioBlk {
             }
             QUEUE_NUM_MAX => QUEUE_SIZE as u64,
             QUEUE_READY => {
-                if self.queue_sel == 0 { self.queue().ready as u64 } else { 0 }
+                if self.queue_sel == 0 {
+                    self.queue().ready as u64
+                } else {
+                    0
+                }
             }
             INTERRUPT_STATUS => self.interrupt_status as u64,
             STATUS => self.status as u64,
@@ -273,8 +284,7 @@ impl VirtioBlk {
 
     /// Check if queue notification is pending and should be processed
     pub fn needs_processing(&self) -> bool {
-        self.queues[0].ready && self.disk.is_some() &&
-            (self.status & STATUS_DRIVER_OK) != 0
+        self.queues[0].ready && self.disk.is_some() && (self.status & STATUS_DRIVER_OK) != 0
     }
 
     /// Process pending virtqueue requests. Needs raw access to guest RAM.
@@ -472,8 +482,14 @@ fn read_u64(ram: &[u8], addr: u64, dram_base: u64) -> u64 {
     let off = addr_to_ram_offset(addr, dram_base);
     if off + 7 < ram.len() {
         u64::from_le_bytes([
-            ram[off], ram[off + 1], ram[off + 2], ram[off + 3],
-            ram[off + 4], ram[off + 5], ram[off + 6], ram[off + 7],
+            ram[off],
+            ram[off + 1],
+            ram[off + 2],
+            ram[off + 3],
+            ram[off + 4],
+            ram[off + 5],
+            ram[off + 6],
+            ram[off + 7],
         ])
     } else {
         0

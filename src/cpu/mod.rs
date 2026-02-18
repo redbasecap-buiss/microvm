@@ -86,7 +86,9 @@ impl Cpu {
 
         // Fetch instruction
         let pc = self.pc;
-        let fetch_result = self.mmu.translate(pc, mmu::AccessType::Execute, self.mode, &self.csrs, bus);
+        let fetch_result =
+            self.mmu
+                .translate(pc, mmu::AccessType::Execute, self.mode, &self.csrs, bus);
         let phys_pc = match fetch_result {
             Ok(addr) => addr,
             Err(exception) => {
@@ -181,7 +183,11 @@ impl Cpu {
     }
 
     fn trap_to_mmode(&mut self, cause: u64, is_interrupt: bool) {
-        let cause_val = if is_interrupt { (1u64 << 63) | cause } else { cause };
+        let cause_val = if is_interrupt {
+            (1u64 << 63) | cause
+        } else {
+            cause
+        };
         self.csrs.write(csr::MCAUSE, cause_val);
         self.csrs.write(csr::MEPC, self.pc);
 
@@ -205,7 +211,11 @@ impl Cpu {
     }
 
     fn trap_to_smode(&mut self, cause: u64, is_interrupt: bool) {
-        let cause_val = if is_interrupt { (1u64 << 63) | cause } else { cause };
+        let cause_val = if is_interrupt {
+            (1u64 << 63) | cause
+        } else {
+            cause
+        };
         self.csrs.write(csr::SCAUSE, cause_val);
         self.csrs.write(csr::SEPC, self.pc);
 

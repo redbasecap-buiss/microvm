@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use super::PrivilegeMode;
+use std::collections::HashMap;
 
 // Machine-level CSRs
 pub const MSTATUS: u16 = 0x300;
@@ -65,7 +65,7 @@ pub const MSTATUS_SPP: u64 = 1 << 8;
 pub const MSTATUS_MPP: u64 = 3 << 11;
 pub const MSTATUS_SUM: u64 = 1 << 18;
 pub const MSTATUS_MXR: u64 = 1 << 19;
-pub const MSTATUS_FS: u64 = 3 << 13;  // Floating-point status field
+pub const MSTATUS_FS: u64 = 3 << 13; // Floating-point status field
 
 // SSTATUS mask — bits visible to S-mode
 const SSTATUS_MASK: u64 = MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP | MSTATUS_SUM | MSTATUS_MXR

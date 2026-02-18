@@ -8,7 +8,11 @@ mod memory;
 mod vm;
 
 #[derive(Parser)]
-#[command(name = "microvm", version, about = "Lightweight RISC-V system emulator — Boot Linux in one command")]
+#[command(
+    name = "microvm",
+    version,
+    about = "Lightweight RISC-V system emulator — Boot Linux in one command"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

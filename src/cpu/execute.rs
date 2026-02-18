@@ -1,7 +1,7 @@
-use super::{Cpu, PrivilegeMode};
 use super::csr;
 use super::decode::Instruction;
 use super::mmu::AccessType;
+use super::{Cpu, PrivilegeMode};
 use crate::memory::Bus;
 
 /// Execute a decoded instruction. Returns true to continue, false to halt.
@@ -20,7 +20,9 @@ pub fn execute(cpu: &mut Cpu, bus: &mut Bus, raw: u32, inst_len: u64) -> bool {
         0x1B => op_imm32(cpu, &inst, inst_len),
         0x33 => op_reg(cpu, &inst, inst_len),
         0x3B => op_reg32(cpu, &inst, inst_len),
-        0x0F => { cpu.pc += inst_len; } // FENCE — nop
+        0x0F => {
+            cpu.pc += inst_len;
+        } // FENCE — nop
         0x73 => return op_system(cpu, bus, &inst, inst_len),
         0x2F => op_atomic(cpu, bus, &inst, inst_len),
         _ => {
@@ -56,12 +58,12 @@ fn op_branch(cpu: &mut Cpu, inst: &Instruction, len: u64) {
     let rs1 = cpu.regs[inst.rs1];
     let rs2 = cpu.regs[inst.rs2];
     let taken = match inst.funct3 {
-        0 => rs1 == rs2,                           // BEQ
-        1 => rs1 != rs2,                           // BNE
-        4 => (rs1 as i64) < (rs2 as i64),          // BLT
-        5 => (rs1 as i64) >= (rs2 as i64),         // BGE
-        6 => rs1 < rs2,                            // BLTU
-        7 => rs1 >= rs2,                           // BGEU
+        0 => rs1 == rs2,                   // BEQ
+        1 => rs1 != rs2,                   // BNE
+        4 => (rs1 as i64) < (rs2 as i64),  // BLT
+        5 => (rs1 as i64) >= (rs2 as i64), // BGE
+        6 => rs1 < rs2,                    // BLTU
+        7 => rs1 >= rs2,                   // BGEU
         _ => false,
     };
     if taken {
@@ -73,18 +75,24 @@ fn op_branch(cpu: &mut Cpu, inst: &Instruction, len: u64) {
 
 fn op_load(cpu: &mut Cpu, bus: &mut Bus, inst: &Instruction, len: u64) {
     let addr = cpu.regs[inst.rs1].wrapping_add(inst.imm_i as u64);
-    let phys = match cpu.mmu.translate(addr, AccessType::Read, cpu.mode, &cpu.csrs, bus) {
+    let phys = match cpu
+        .mmu
+        .translate(addr, AccessType::Read, cpu.mode, &cpu.csrs, bus)
+    {
         Ok(a) => a,
-        Err(e) => { cpu.handle_exception(e, addr, bus); return; }
+        Err(e) => {
+            cpu.handle_exception(e, addr, bus);
+            return;
+        }
     };
     let val = match inst.funct3 {
-        0 => bus.read8(phys) as i8 as i64 as u64,      // LB
-        1 => bus.read16(phys) as i16 as i64 as u64,     // LH
-        2 => bus.read32(phys) as i32 as i64 as u64,     // LW
-        3 => bus.read64(phys),                           // LD
-        4 => bus.read8(phys) as u64,                     // LBU
-        5 => bus.read16(phys) as u64,                    // LHU
-        6 => bus.read32(phys) as u64,                    // LWU
+        0 => bus.read8(phys) as i8 as i64 as u64,   // LB
+        1 => bus.read16(phys) as i16 as i64 as u64, // LH
+        2 => bus.read32(phys) as i32 as i64 as u64, // LW
+        3 => bus.read64(phys),                      // LD
+        4 => bus.read8(phys) as u64,                // LBU
+        5 => bus.read16(phys) as u64,               // LHU
+        6 => bus.read32(phys) as u64,               // LWU
         _ => 0,
     };
     cpu.regs[inst.rd] = val;
@@ -93,9 +101,15 @@ fn op_load(cpu: &mut Cpu, bus: &mut Bus, inst: &Instruction, len: u64) {
 
 fn op_store(cpu: &mut Cpu, bus: &mut Bus, inst: &Instruction, len: u64) {
     let addr = cpu.regs[inst.rs1].wrapping_add(inst.imm_s as u64);
-    let phys = match cpu.mmu.translate(addr, AccessType::Write, cpu.mode, &cpu.csrs, bus) {
+    let phys = match cpu
+        .mmu
+        .translate(addr, AccessType::Write, cpu.mode, &cpu.csrs, bus)
+    {
         Ok(a) => a,
-        Err(e) => { cpu.handle_exception(e, addr, bus); return; }
+        Err(e) => {
+            cpu.handle_exception(e, addr, bus);
+            return;
+        }
     };
     let val = cpu.regs[inst.rs2];
     match inst.funct3 {
@@ -113,20 +127,20 @@ fn op_imm(cpu: &mut Cpu, inst: &Instruction, len: u64) {
     let imm = inst.imm_i as u64;
     let shamt = (imm & 0x3F) as u32;
     let val = match inst.funct3 {
-        0 => rs1.wrapping_add(imm),                             // ADDI
-        1 => rs1 << shamt,                                      // SLLI
-        2 => ((rs1 as i64) < (imm as i64)) as u64,             // SLTI
-        3 => (rs1 < imm) as u64,                                // SLTIU
-        4 => rs1 ^ imm,                                         // XORI
+        0 => rs1.wrapping_add(imm),                // ADDI
+        1 => rs1 << shamt,                         // SLLI
+        2 => ((rs1 as i64) < (imm as i64)) as u64, // SLTI
+        3 => (rs1 < imm) as u64,                   // SLTIU
+        4 => rs1 ^ imm,                            // XORI
         5 => {
             if (inst.raw >> 30) & 1 == 1 {
-                ((rs1 as i64) >> shamt) as u64                  // SRAI
+                ((rs1 as i64) >> shamt) as u64 // SRAI
             } else {
-                rs1 >> shamt                                     // SRLI
+                rs1 >> shamt // SRLI
             }
         }
-        6 => rs1 | imm,                                         // ORI
-        7 => rs1 & imm,                                         // ANDI
+        6 => rs1 | imm, // ORI
+        7 => rs1 & imm, // ANDI
         _ => 0,
     };
     cpu.regs[inst.rd] = val;
@@ -138,13 +152,13 @@ fn op_imm32(cpu: &mut Cpu, inst: &Instruction, len: u64) {
     let imm = inst.imm_i as u32;
     let shamt = (imm & 0x1F) as u32;
     let val = match inst.funct3 {
-        0 => rs1.wrapping_add(imm) as i32 as i64 as u64,       // ADDIW
-        1 => (rs1 << shamt) as i32 as i64 as u64,              // SLLIW
+        0 => rs1.wrapping_add(imm) as i32 as i64 as u64, // ADDIW
+        1 => (rs1 << shamt) as i32 as i64 as u64,        // SLLIW
         5 => {
             if (inst.raw >> 30) & 1 == 1 {
-                ((rs1 as i32) >> shamt) as i64 as u64           // SRAIW
+                ((rs1 as i32) >> shamt) as i64 as u64 // SRAIW
             } else {
-                (rs1 >> shamt) as i32 as i64 as u64             // SRLIW
+                (rs1 >> shamt) as i32 as i64 as u64 // SRLIW
             }
         }
         _ => 0,
@@ -160,40 +174,56 @@ fn op_reg(cpu: &mut Cpu, inst: &Instruction, len: u64) {
     let val = if inst.funct7 == 0x01 {
         // RV64M
         match inst.funct3 {
-            0 => rs1.wrapping_mul(rs2),                                          // MUL
+            0 => rs1.wrapping_mul(rs2), // MUL
             1 => ((rs1 as i64 as i128).wrapping_mul(rs2 as i64 as i128) >> 64) as u64, // MULH
             2 => ((rs1 as i64 as i128).wrapping_mul(rs2 as u128 as i128) >> 64) as u64, // MULHSU
-            3 => ((rs1 as u128).wrapping_mul(rs2 as u128) >> 64) as u64,        // MULHU
+            3 => ((rs1 as u128).wrapping_mul(rs2 as u128) >> 64) as u64, // MULHU
             4 => {
-                if rs2 == 0 { u64::MAX }
-                else if rs1 as i64 == i64::MIN && rs2 as i64 == -1 { rs1 }
-                else { ((rs1 as i64).wrapping_div(rs2 as i64)) as u64 }          // DIV
+                if rs2 == 0 {
+                    u64::MAX
+                } else if rs1 as i64 == i64::MIN && rs2 as i64 == -1 {
+                    rs1
+                } else {
+                    ((rs1 as i64).wrapping_div(rs2 as i64)) as u64
+                } // DIV
             }
             5 => {
-                if rs2 == 0 { u64::MAX } else { rs1.wrapping_div(rs2) }          // DIVU
+                if rs2 == 0 {
+                    u64::MAX
+                } else {
+                    rs1.wrapping_div(rs2)
+                } // DIVU
             }
             6 => {
-                if rs2 == 0 { rs1 }
-                else if rs1 as i64 == i64::MIN && rs2 as i64 == -1 { 0 }
-                else { ((rs1 as i64).wrapping_rem(rs2 as i64)) as u64 }          // REM
+                if rs2 == 0 {
+                    rs1
+                } else if rs1 as i64 == i64::MIN && rs2 as i64 == -1 {
+                    0
+                } else {
+                    ((rs1 as i64).wrapping_rem(rs2 as i64)) as u64
+                } // REM
             }
             7 => {
-                if rs2 == 0 { rs1 } else { rs1.wrapping_rem(rs2) }               // REMU
+                if rs2 == 0 {
+                    rs1
+                } else {
+                    rs1.wrapping_rem(rs2)
+                } // REMU
             }
             _ => 0,
         }
     } else {
         match (inst.funct3, inst.funct7) {
-            (0, 0x00) => rs1.wrapping_add(rs2),                    // ADD
-            (0, 0x20) => rs1.wrapping_sub(rs2),                    // SUB
-            (1, 0x00) => rs1 << (rs2 & 0x3F),                     // SLL
-            (2, 0x00) => ((rs1 as i64) < (rs2 as i64)) as u64,    // SLT
-            (3, 0x00) => (rs1 < rs2) as u64,                       // SLTU
-            (4, 0x00) => rs1 ^ rs2,                                 // XOR
-            (5, 0x00) => rs1 >> (rs2 & 0x3F),                     // SRL
-            (5, 0x20) => ((rs1 as i64) >> (rs2 & 0x3F)) as u64,   // SRA
-            (6, 0x00) => rs1 | rs2,                                 // OR
-            (7, 0x00) => rs1 & rs2,                                 // AND
+            (0, 0x00) => rs1.wrapping_add(rs2),                 // ADD
+            (0, 0x20) => rs1.wrapping_sub(rs2),                 // SUB
+            (1, 0x00) => rs1 << (rs2 & 0x3F),                   // SLL
+            (2, 0x00) => ((rs1 as i64) < (rs2 as i64)) as u64,  // SLT
+            (3, 0x00) => (rs1 < rs2) as u64,                    // SLTU
+            (4, 0x00) => rs1 ^ rs2,                             // XOR
+            (5, 0x00) => rs1 >> (rs2 & 0x3F),                   // SRL
+            (5, 0x20) => ((rs1 as i64) >> (rs2 & 0x3F)) as u64, // SRA
+            (6, 0x00) => rs1 | rs2,                             // OR
+            (7, 0x00) => rs1 & rs2,                             // AND
             _ => 0,
         }
     };
@@ -208,33 +238,47 @@ fn op_reg32(cpu: &mut Cpu, inst: &Instruction, len: u64) {
     let val = if inst.funct7 == 0x01 {
         // RV64M — 32-bit variants
         match inst.funct3 {
-            0 => rs1.wrapping_mul(rs2) as i32 as i64 as u64,     // MULW
+            0 => rs1.wrapping_mul(rs2) as i32 as i64 as u64, // MULW
             4 => {
-                if rs2 == 0 { u32::MAX as i32 as i64 as u64 }
-                else if rs1 as i32 == i32::MIN && rs2 as i32 == -1 { rs1 as i32 as i64 as u64 }
-                else { ((rs1 as i32).wrapping_div(rs2 as i32)) as i64 as u64 }
+                if rs2 == 0 {
+                    u32::MAX as i32 as i64 as u64
+                } else if rs1 as i32 == i32::MIN && rs2 as i32 == -1 {
+                    rs1 as i32 as i64 as u64
+                } else {
+                    ((rs1 as i32).wrapping_div(rs2 as i32)) as i64 as u64
+                }
             }
             5 => {
-                if rs2 == 0 { u32::MAX as i32 as i64 as u64 }
-                else { rs1.wrapping_div(rs2) as i32 as i64 as u64 }
+                if rs2 == 0 {
+                    u32::MAX as i32 as i64 as u64
+                } else {
+                    rs1.wrapping_div(rs2) as i32 as i64 as u64
+                }
             }
             6 => {
-                if rs2 == 0 { rs1 as i32 as i64 as u64 }
-                else if rs1 as i32 == i32::MIN && rs2 as i32 == -1 { 0 }
-                else { ((rs1 as i32).wrapping_rem(rs2 as i32)) as i64 as u64 }
+                if rs2 == 0 {
+                    rs1 as i32 as i64 as u64
+                } else if rs1 as i32 == i32::MIN && rs2 as i32 == -1 {
+                    0
+                } else {
+                    ((rs1 as i32).wrapping_rem(rs2 as i32)) as i64 as u64
+                }
             }
             7 => {
-                if rs2 == 0 { rs1 as i32 as i64 as u64 }
-                else { rs1.wrapping_rem(rs2) as i32 as i64 as u64 }
+                if rs2 == 0 {
+                    rs1 as i32 as i64 as u64
+                } else {
+                    rs1.wrapping_rem(rs2) as i32 as i64 as u64
+                }
             }
             _ => 0,
         }
     } else {
         match (inst.funct3, inst.funct7) {
-            (0, 0x00) => rs1.wrapping_add(rs2) as i32 as i64 as u64,    // ADDW
-            (0, 0x20) => rs1.wrapping_sub(rs2) as i32 as i64 as u64,    // SUBW
-            (1, 0x00) => (rs1 << (rs2 & 0x1F)) as i32 as i64 as u64,   // SLLW
-            (5, 0x00) => (rs1 >> (rs2 & 0x1F)) as i32 as i64 as u64,   // SRLW
+            (0, 0x00) => rs1.wrapping_add(rs2) as i32 as i64 as u64, // ADDW
+            (0, 0x20) => rs1.wrapping_sub(rs2) as i32 as i64 as u64, // SUBW
+            (1, 0x00) => (rs1 << (rs2 & 0x1F)) as i32 as i64 as u64, // SLLW
+            (5, 0x00) => (rs1 >> (rs2 & 0x1F)) as i32 as i64 as u64, // SRLW
             (5, 0x20) => ((rs1 as i32) >> (rs2 & 0x1F)) as i64 as u64, // SRAW
             _ => 0,
         }
@@ -248,13 +292,20 @@ fn op_atomic(cpu: &mut Cpu, bus: &mut Bus, inst: &Instruction, len: u64) {
     let addr = cpu.regs[inst.rs1];
     let is_word = inst.funct3 == 2; // funct3=2 → 32-bit, funct3=3 → 64-bit
 
-    let phys = match cpu.mmu.translate(addr, AccessType::Write, cpu.mode, &cpu.csrs, bus) {
+    let phys = match cpu
+        .mmu
+        .translate(addr, AccessType::Write, cpu.mode, &cpu.csrs, bus)
+    {
         Ok(a) => a,
-        Err(e) => { cpu.handle_exception(e, addr, bus); return; }
+        Err(e) => {
+            cpu.handle_exception(e, addr, bus);
+            return;
+        }
     };
 
     match funct5 {
-        0x02 => { // LR
+        0x02 => {
+            // LR
             let val = if is_word {
                 bus.read32(phys) as i32 as i64 as u64
             } else {
@@ -263,7 +314,8 @@ fn op_atomic(cpu: &mut Cpu, bus: &mut Bus, inst: &Instruction, len: u64) {
             cpu.regs[inst.rd] = val;
             cpu.reservation = Some(addr);
         }
-        0x03 => { // SC
+        0x03 => {
+            // SC
             if cpu.reservation == Some(addr) {
                 let val = cpu.regs[inst.rs2];
                 if is_word {
@@ -286,15 +338,15 @@ fn op_atomic(cpu: &mut Cpu, bus: &mut Bus, inst: &Instruction, len: u64) {
             };
             let src = cpu.regs[inst.rs2];
             let result = match funct5 {
-                0x01 => src,                                              // AMOSWAP
-                0x00 => old.wrapping_add(src),                           // AMOADD
-                0x04 => old ^ src,                                        // AMOXOR
-                0x0C => old & src,                                        // AMOAND
-                0x08 => old | src,                                        // AMOOR
-                0x10 => std::cmp::min(old as i64, src as i64) as u64,   // AMOMIN
-                0x14 => std::cmp::max(old as i64, src as i64) as u64,   // AMOMAX
-                0x18 => std::cmp::min(old, src),                         // AMOMINU
-                0x1C => std::cmp::max(old, src),                         // AMOMAXU
+                0x01 => src,                                          // AMOSWAP
+                0x00 => old.wrapping_add(src),                        // AMOADD
+                0x04 => old ^ src,                                    // AMOXOR
+                0x0C => old & src,                                    // AMOAND
+                0x08 => old | src,                                    // AMOOR
+                0x10 => std::cmp::min(old as i64, src as i64) as u64, // AMOMIN
+                0x14 => std::cmp::max(old as i64, src as i64) as u64, // AMOMAX
+                0x18 => std::cmp::min(old, src),                      // AMOMINU
+                0x1C => std::cmp::max(old, src),                      // AMOMAXU
                 _ => old,
             };
             if is_word {
@@ -311,7 +363,8 @@ fn op_atomic(cpu: &mut Cpu, bus: &mut Bus, inst: &Instruction, len: u64) {
 fn op_system(cpu: &mut Cpu, bus: &mut Bus, inst: &Instruction, len: u64) -> bool {
     if inst.funct3 == 0 {
         match inst.raw {
-            0x00000073 => { // ECALL
+            0x00000073 => {
+                // ECALL
                 if cpu.mode == PrivilegeMode::Supervisor {
                     // SBI call — handle in M-mode firmware
                     if handle_sbi_call(cpu, bus) {
@@ -327,11 +380,13 @@ fn op_system(cpu: &mut Cpu, bus: &mut Bus, inst: &Instruction, len: u64) -> bool
                 cpu.handle_exception(cause, 0, bus);
                 return true;
             }
-            0x00100073 => { // EBREAK
+            0x00100073 => {
+                // EBREAK
                 cpu.handle_exception(3, cpu.pc, bus);
                 return true;
             }
-            0x10200073 => { // SRET
+            0x10200073 => {
+                // SRET
                 let sstatus = cpu.csrs.read(csr::SSTATUS);
                 let spp = (sstatus >> 8) & 1;
                 let spie = (sstatus >> 5) & 1;
@@ -341,10 +396,15 @@ fn op_system(cpu: &mut Cpu, bus: &mut Bus, inst: &Instruction, len: u64) -> bool
                 new_sstatus &= !(1 << 8); // SPP = 0
                 cpu.csrs.write(csr::SSTATUS, new_sstatus);
                 cpu.pc = cpu.csrs.read(csr::SEPC);
-                cpu.mode = if spp == 1 { PrivilegeMode::Supervisor } else { PrivilegeMode::User };
+                cpu.mode = if spp == 1 {
+                    PrivilegeMode::Supervisor
+                } else {
+                    PrivilegeMode::User
+                };
                 return true;
             }
-            0x30200073 => { // MRET
+            0x30200073 => {
+                // MRET
                 let mstatus = cpu.csrs.read(csr::MSTATUS);
                 let mpp = (mstatus >> 11) & 3;
                 let mpie = (mstatus >> 7) & 1;
@@ -357,7 +417,8 @@ fn op_system(cpu: &mut Cpu, bus: &mut Bus, inst: &Instruction, len: u64) -> bool
                 cpu.mode = PrivilegeMode::from_u64(mpp);
                 return true;
             }
-            0x10500073 => { // WFI
+            0x10500073 => {
+                // WFI
                 cpu.wfi = true;
                 cpu.pc += len;
                 return true;
@@ -385,7 +446,11 @@ fn op_system(cpu: &mut Cpu, bus: &mut Bus, inst: &Instruction, len: u64) -> bool
                         return true;
                     }
                     _ => {
-                        log::warn!("Unknown SYSTEM instruction: {:#010x} at PC={:#x}", inst.raw, cpu.pc);
+                        log::warn!(
+                            "Unknown SYSTEM instruction: {:#010x} at PC={:#x}",
+                            inst.raw,
+                            cpu.pc
+                        );
                         cpu.handle_exception(2, inst.raw as u64, bus);
                         return true;
                     }
@@ -415,12 +480,12 @@ fn op_system(cpu: &mut Cpu, bus: &mut Bus, inst: &Instruction, len: u64) -> bool
     let old_val = cpu.csrs.read(csr_addr);
 
     let write_val = match inst.funct3 {
-        1 => cpu.regs[inst.rs1],                                    // CSRRW
-        2 => old_val | cpu.regs[inst.rs1],                          // CSRRS
-        3 => old_val & !cpu.regs[inst.rs1],                         // CSRRC
-        5 => inst.rs1 as u64,                                        // CSRRWI
-        6 => old_val | (inst.rs1 as u64),                           // CSRRSI
-        7 => old_val & !(inst.rs1 as u64),                          // CSRRCI
+        1 => cpu.regs[inst.rs1],            // CSRRW
+        2 => old_val | cpu.regs[inst.rs1],  // CSRRS
+        3 => old_val & !cpu.regs[inst.rs1], // CSRRC
+        5 => inst.rs1 as u64,               // CSRRWI
+        6 => old_val | (inst.rs1 as u64),   // CSRRSI
+        7 => old_val & !(inst.rs1 as u64),  // CSRRCI
         _ => {
             cpu.pc += len;
             return true;
@@ -497,40 +562,58 @@ fn handle_sbi_call(cpu: &mut Cpu, bus: &mut Bus) -> bool {
         0x10 => {
             // Base extension
             match fid {
-                0 => { // sbi_get_spec_version
+                0 => {
+                    // sbi_get_spec_version
                     cpu.regs[10] = 0; // success
-                    // SBI spec v2.0: encoding is (major << 24) | minor
+                                      // SBI spec v2.0: encoding is (major << 24) | minor
                     cpu.regs[11] = (2u64 << 24) | 0;
                     true
                 }
-                1 => { // sbi_get_impl_id
+                1 => {
+                    // sbi_get_impl_id
                     cpu.regs[10] = 0;
                     cpu.regs[11] = 0xFF; // custom implementation
                     true
                 }
-                2 => { // sbi_get_impl_version
+                2 => {
+                    // sbi_get_impl_version
                     cpu.regs[10] = 0;
                     cpu.regs[11] = 1;
                     true
                 }
-                3 => { // sbi_probe_extension
+                3 => {
+                    // sbi_probe_extension
                     let ext_id = a0;
-                    let available = matches!(ext_id, 0x00 | 0x01 | 0x02 | 0x10 | 0x54494D45 | 0x735049 | 0x48534D | 0x52464E43 | 0x53525354 | 0x4442434E);
+                    let available = matches!(
+                        ext_id,
+                        0x00 | 0x01
+                            | 0x02
+                            | 0x10
+                            | 0x54494D45
+                            | 0x735049
+                            | 0x48534D
+                            | 0x52464E43
+                            | 0x53525354
+                            | 0x4442434E
+                    );
                     cpu.regs[10] = 0;
                     cpu.regs[11] = if available { 1 } else { 0 };
                     true
                 }
-                4 => { // sbi_get_mvendorid
+                4 => {
+                    // sbi_get_mvendorid
                     cpu.regs[10] = 0;
                     cpu.regs[11] = 0;
                     true
                 }
-                5 => { // sbi_get_marchid
+                5 => {
+                    // sbi_get_marchid
                     cpu.regs[10] = 0;
                     cpu.regs[11] = 0;
                     true
                 }
-                6 => { // sbi_get_mimpid
+                6 => {
+                    // sbi_get_mimpid
                     cpu.regs[10] = 0;
                     cpu.regs[11] = 0;
                     true
@@ -545,7 +628,8 @@ fn handle_sbi_call(cpu: &mut Cpu, bus: &mut Bus) -> bool {
         0x54494D45 => {
             // Timer extension (TIME)
             match fid {
-                0 => { // sbi_set_timer
+                0 => {
+                    // sbi_set_timer
                     bus.clint.mtimecmp = a0;
                     let mip = cpu.csrs.read(csr::MIP);
                     cpu.csrs.write(csr::MIP, mip & !(1 << 5)); // Clear STIP
@@ -563,7 +647,8 @@ fn handle_sbi_call(cpu: &mut Cpu, bus: &mut Bus) -> bool {
         0x735049 => {
             // sPI (IPI) extension
             match fid {
-                0 => { // sbi_send_ipi
+                0 => {
+                    // sbi_send_ipi
                     // Single-hart system, send IPI to self
                     let mip = cpu.csrs.read(csr::MIP);
                     cpu.csrs.write(csr::MIP, mip | (1 << 1)); // Set SSIP
@@ -581,12 +666,14 @@ fn handle_sbi_call(cpu: &mut Cpu, bus: &mut Bus) -> bool {
         0x48534D => {
             // HSM (Hart State Management) extension
             match fid {
-                0 => { // hart_start — not supported (single hart)
+                0 => {
+                    // hart_start — not supported (single hart)
                     cpu.regs[10] = (-2i64) as u64;
                     cpu.regs[11] = 0;
                     true
                 }
-                2 => { // hart_get_status
+                2 => {
+                    // hart_get_status
                     cpu.regs[10] = 0; // success
                     cpu.regs[11] = 0; // STARTED
                     true
@@ -602,17 +689,20 @@ fn handle_sbi_call(cpu: &mut Cpu, bus: &mut Bus) -> bool {
             // RFENCE extension — remote fence operations
             // On a single-hart system these are all no-ops that succeed
             match fid {
-                0 => { // remote_fence_i
+                0 => {
+                    // remote_fence_i
                     cpu.regs[10] = 0;
                     cpu.regs[11] = 0;
                     true
                 }
-                1 => { // remote_sfence_vma
+                1 => {
+                    // remote_sfence_vma
                     cpu.regs[10] = 0;
                     cpu.regs[11] = 0;
                     true
                 }
-                2 => { // remote_sfence_vma_asid
+                2 => {
+                    // remote_sfence_vma_asid
                     cpu.regs[10] = 0;
                     cpu.regs[11] = 0;
                     true
@@ -627,8 +717,13 @@ fn handle_sbi_call(cpu: &mut Cpu, bus: &mut Bus) -> bool {
         0x53525354 => {
             // SRST (System Reset) extension
             match fid {
-                0 => { // system_reset
-                    log::info!("SBI system reset requested (type={}, reason={})", a0, cpu.regs[11]);
+                0 => {
+                    // system_reset
+                    log::info!(
+                        "SBI system reset requested (type={}, reason={})",
+                        a0,
+                        cpu.regs[11]
+                    );
                     std::process::exit(0);
                 }
                 _ => {
@@ -641,7 +736,8 @@ fn handle_sbi_call(cpu: &mut Cpu, bus: &mut Bus) -> bool {
         0x4442434E => {
             // DBCN (Debug Console) extension
             match fid {
-                0 => { // sbi_debug_console_write
+                0 => {
+                    // sbi_debug_console_write
                     // a0 = num_bytes, a1 = base_addr_lo, a2 = base_addr_hi
                     let num_bytes = a0 as usize;
                     let base_addr = cpu.regs[11]; // a1
@@ -670,13 +766,15 @@ fn handle_sbi_call(cpu: &mut Cpu, bus: &mut Bus) -> bool {
                     cpu.regs[11] = num_bytes as u64;
                     true
                 }
-                1 => { // sbi_debug_console_read
+                1 => {
+                    // sbi_debug_console_read
                     // Not supported (no non-blocking read)
                     cpu.regs[10] = 0;
                     cpu.regs[11] = 0; // 0 bytes read
                     true
                 }
-                2 => { // sbi_debug_console_write_byte
+                2 => {
+                    // sbi_debug_console_write_byte
                     let byte = a0 as u8;
                     use std::io::Write;
                     let mut stdout = std::io::stdout().lock();

@@ -21,12 +21,12 @@ impl BootRom {
         // We need to set it to (1<<54)-1 for RV64 TOR mode (covers 56-bit physical space)
         // li t0, -1
         code.push(0xFFF00293); // addi t0, zero, -1
-        // csrw pmpaddr0, t0
+                               // csrw pmpaddr0, t0
         code.push(0x3B029073); // csrw 0x3B0, t0
-        // li t0, 0x1F (TOR=0b01_000, RWX=0b111 → 0x0F; actually: A=TOR(01), match all, RWX)
-        // pmpcfg0[7:0] = L=0, reserved=0, A=TOR(01), X=1, W=1, R=1 = 0b00_01_1_1_1_1 = 0x0F
+                               // li t0, 0x1F (TOR=0b01_000, RWX=0b111 → 0x0F; actually: A=TOR(01), match all, RWX)
+                               // pmpcfg0[7:0] = L=0, reserved=0, A=TOR(01), X=1, W=1, R=1 = 0b00_01_1_1_1_1 = 0x0F
         code.push(0x00F00293); // addi t0, zero, 0x0F
-        // csrw pmpcfg0, t0
+                               // csrw pmpcfg0, t0
         code.push(0x3A029073); // csrw 0x3A0, t0
 
         // ===== Delegate exceptions and interrupts to S-mode =====
@@ -46,7 +46,7 @@ impl BootRom {
         // mcounteren: allow CY, TM, IR (bits 0,1,2)
         code.push(0x00700293); // addi t0, zero, 7
         code.push(0x30629073); // csrw mcounteren, t0
-        // scounteren: same
+                               // scounteren: same
         code.push(0x00700293); // addi t0, zero, 7
         code.push(0x10629073); // csrw scounteren, t0
 
@@ -75,15 +75,15 @@ impl BootRom {
         // = 0xA00000880
         // Use csrr, then mask with CSR instructions
         code.push(0x300022F3); // csrr t0, mstatus
-        // CSRC mstatus, 0x18 — clear bits 4:3 (not what we want)
-        // Actually we need to clear bits 12:11. Use register approach:
-        // li t1, (3 << 11) = 0x1800
+                               // CSRC mstatus, 0x18 — clear bits 4:3 (not what we want)
+                               // Actually we need to clear bits 12:11. Use register approach:
+                               // li t1, (3 << 11) = 0x1800
         Self::emit_load_imm(&mut code, 6, 3 << 11); // t1 = 0x1800
-        // csrc mstatus, t1  (clear MPP bits)
+                                                    // csrc mstatus, t1  (clear MPP bits)
         code.push(0x30033073); // csrrc x0, mstatus, t1
-        // li t1, (1 << 11) | (1 << 7) = 0x880
+                               // li t1, (1 << 11) | (1 << 7) = 0x880
         Self::emit_load_imm(&mut code, 6, (1 << 11) | (1 << 7)); // t1 = 0x880
-        // csrs mstatus, t1  (set MPP=S, MPIE=1)
+                                                                 // csrs mstatus, t1  (set MPP=S, MPIE=1)
         code.push(0x30032073); // csrrs x0, mstatus, t1
 
         // ===== Set mepc = kernel_entry =====
@@ -136,10 +136,11 @@ impl BootRom {
             let lo = (addr & 0xFFF) as u32;
             code.push((hi << 12) | (rd << 7) | 0x37); // lui rd, hi
             code.push((lo << 20) | (rd << 15) | (0 << 12) | (rd << 7) | 0x13); // addi rd, rd, lo
-            // Zero-extend: slli rd, rd, 32 then srli rd, rd, 32
+                                                                               // Zero-extend: slli rd, rd, 32 then srli rd, rd, 32
             let shamt32 = 32u32;
             code.push((shamt32 << 20) | (rd << 15) | (1 << 12) | (rd << 7) | 0x13); // slli rd, rd, 32
-            code.push((shamt32 << 20) | (rd << 15) | (5 << 12) | (rd << 7) | 0x13); // srli rd, rd, 32
+            code.push((shamt32 << 20) | (rd << 15) | (5 << 12) | (rd << 7) | 0x13);
+        // srli rd, rd, 32
         } else {
             // Full 64-bit: build upper 32 bits first, then shift and OR lower
             let hi = ((addr.wrapping_add(0x800) >> 12) & 0xFFFFF) as u32;
@@ -173,7 +174,8 @@ mod tests {
     fn test_boot_rom_contains_mret() {
         let code = BootRom::generate(0x80200000, 0x87FF0000);
         // MRET (0x30200073) should be present in the code
-        let instrs: Vec<u32> = code.chunks(4)
+        let instrs: Vec<u32> = code
+            .chunks(4)
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
         assert!(instrs.contains(&0x30200073), "Boot ROM should contain MRET");
@@ -184,7 +186,8 @@ mod tests {
         let code = BootRom::generate(0x80200000, 0x87FF0000);
         // Check that PMP setup instructions are present
         // csrw pmpaddr0 (0x3B0) should be in the code
-        let instrs: Vec<u32> = code.chunks(4)
+        let instrs: Vec<u32> = code
+            .chunks(4)
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
         assert!(instrs.contains(&0x3B029073), "Should contain csrw pmpaddr0");

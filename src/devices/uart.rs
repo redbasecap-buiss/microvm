@@ -1,5 +1,5 @@
-use std::io::{self, Write};
 use std::collections::VecDeque;
+use std::io::{self, Write};
 
 /// 16550 UART emulation
 pub struct Uart {
@@ -23,13 +23,13 @@ pub struct Uart {
 }
 
 // LSR bits
-const LSR_DR: u8 = 1 << 0;    // Data Ready
-const LSR_THRE: u8 = 1 << 5;  // Transmit Holding Register Empty
-const LSR_TEMT: u8 = 1 << 6;  // Transmitter Empty
+const LSR_DR: u8 = 1 << 0; // Data Ready
+const LSR_THRE: u8 = 1 << 5; // Transmit Holding Register Empty
+const LSR_TEMT: u8 = 1 << 6; // Transmitter Empty
 
 // IER bits
-const IER_RDA: u8 = 1 << 0;   // Received Data Available
-const IER_THRE: u8 = 1 << 1;  // Transmitter Holding Register Empty
+const IER_RDA: u8 = 1 << 0; // Received Data Available
+const IER_THRE: u8 = 1 << 1; // Transmitter Holding Register Empty
 
 impl Uart {
     pub fn new() -> Self {
@@ -85,7 +85,11 @@ impl Uart {
                 }
             }
             1 => {
-                if dlab == 1 { self.dlm as u64 } else { self.ier as u64 }
+                if dlab == 1 {
+                    self.dlm as u64
+                } else {
+                    self.ier as u64
+                }
             }
             2 => {
                 // IIR — Interrupt Identification Register
@@ -143,7 +147,11 @@ impl Uart {
                 }
             }
             1 => {
-                if dlab == 1 { self.dlm = val; } else { self.ier = val; }
+                if dlab == 1 {
+                    self.dlm = val;
+                } else {
+                    self.ier = val;
+                }
             }
             2 => self.fcr = val,
             3 => self.lcr = val,

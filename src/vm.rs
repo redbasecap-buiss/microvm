@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
-use crate::cpu::Cpu;
 use crate::cpu::csr;
+use crate::cpu::Cpu;
 use crate::dtb;
-use crate::memory::{Bus, DRAM_BASE};
 use crate::memory::rom::BootRom;
+use crate::memory::{Bus, DRAM_BASE};
 
 pub struct VmConfig {
     pub kernel_path: PathBuf,
@@ -32,11 +32,10 @@ impl Vm {
         let ram_bytes = self.config.ram_size_mib * 1024 * 1024;
 
         // Load kernel
-        let kernel_data = std::fs::read(&self.config.kernel_path)
-            .unwrap_or_else(|e| {
-                eprintln!("Failed to read kernel: {}", e);
-                std::process::exit(1);
-            });
+        let kernel_data = std::fs::read(&self.config.kernel_path).unwrap_or_else(|e| {
+            eprintln!("Failed to read kernel: {}", e);
+            std::process::exit(1);
+        });
 
         let kernel_offset = self.config.load_addr - DRAM_BASE;
         self.bus.load_binary(&kernel_data, kernel_offset);
@@ -51,7 +50,11 @@ impl Vm {
         // Attach disk image if provided
         if let Some(ref disk_path) = self.config.disk_path {
             if let Err(e) = self.bus.virtio_blk.attach_disk(disk_path) {
-                eprintln!("Warning: Failed to attach disk {}: {}", disk_path.display(), e);
+                eprintln!(
+                    "Warning: Failed to attach disk {}: {}",
+                    disk_path.display(),
+                    e
+                );
             }
         }
 
