@@ -137,7 +137,7 @@ impl BootRom {
             let lo = (addr & 0xFFF) as u32;
             code.push((hi << 12) | (rd << 7) | 0x37); // lui rd, hi
             code.push(((lo << 20) | (rd << 15)) | (rd << 7) | 0x13); // addi rd, rd, lo
-                                                                               // Zero-extend: slli rd, rd, 32 then srli rd, rd, 32
+                                                                     // Zero-extend: slli rd, rd, 32 then srli rd, rd, 32
             let shamt32 = 32u32;
             code.push((shamt32 << 20) | (rd << 15) | (1 << 12) | (rd << 7) | 0x13); // slli rd, rd, 32
             code.push((shamt32 << 20) | (rd << 15) | (5 << 12) | (rd << 7) | 0x13);

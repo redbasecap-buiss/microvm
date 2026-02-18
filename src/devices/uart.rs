@@ -52,7 +52,6 @@ impl Uart {
         }
     }
 
-
     /// Feed a byte into the receive buffer (from external source)
     pub fn push_byte(&mut self, b: u8) {
         self.rx_buf.push_back(b);
