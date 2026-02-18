@@ -874,3 +874,146 @@ fn test_firmware_boot_drops_to_smode() {
     let mcounteren = cpu.csrs.read(csr::MCOUNTEREN);
     assert_eq!(mcounteren & 7, 7, "mcounteren should enable CY, TM, IR");
 }
+
+// ============== SBI RFENCE Extension ==============
+
+#[test]
+fn test_sbi_rfence_remote_fence_i() {
+    // Set up S-mode ECALL with a7=0x52464E43 (RFENCE), a6=0 (remote_fence_i)
+    let program = &[
+        // Set a7 = 0x52464E43 (RFENCE EID)
+        // lui a7, 0x52465 → upper 20 bits
+        0x524658B7u32, // lui a7, 0x52465
+        // addi a7, a7, 0x43 (but we need 0x52464F43... let me recalc)
+        // 0x52464E43: upper20 = 0x52465 (with rounding for addi sign), lo12 = 0xE43
+        // Actually: 0x52465000 - 0x52464E43 = 0x1BD → not right
+        // 0x52464E43 = 0x52465 << 12 | 0xFFFFFFFFFFFFE43  hmm
+        // Let's do: lui = (0x52464E43 + 0x800) >> 12 = 0x52465, lo = 0xE43 - 0x1000 = -0x1BD? No.
+        // 0x52464E43: hi = 0x52464E43 >> 12 = 0x52464E, lo = 0x443
+        // But LUI loads upper 20 bits: lui = 0x52465, addi = 0xFFFFFE43 sign-ext = -0x1BD
+        // 0x52465000 + (-0x1BD) = 0x52464E43. Yes!
+    ];
+    // This is complex to set up in raw instructions. Let me use a simpler approach
+    // with the helper. Set registers directly before stepping.
+    let mut bus = Bus::new(64 * 1024);
+    // ECALL instruction
+    let ecall: u32 = 0x00000073;
+    bus.load_binary(&ecall.to_le_bytes(), 0);
+
+    let mut cpu = Cpu::new();
+    cpu.reset(DRAM_BASE);
+    cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
+    cpu.regs[17] = 0x52464E43; // a7 = RFENCE EID
+    cpu.regs[16] = 0;          // a6 = remote_fence_i (FID 0)
+    cpu.regs[10] = 0;          // a0 = hart_mask
+
+    // Set up mtvec so the SBI handler can work (boot ROM sets this, we simulate)
+    // We need the SBI call to be handled in execute.rs handle_sbi_call
+    cpu.step(&mut bus);
+
+    // Should return SBI_SUCCESS (0) in a0
+    assert_eq!(cpu.regs[10], 0, "RFENCE remote_fence_i should return SBI_SUCCESS");
+}
+
+#[test]
+fn test_sbi_rfence_remote_sfence_vma() {
+    let mut bus = Bus::new(64 * 1024);
+    let ecall: u32 = 0x00000073;
+    bus.load_binary(&ecall.to_le_bytes(), 0);
+
+    let mut cpu = Cpu::new();
+    cpu.reset(DRAM_BASE);
+    cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
+    cpu.regs[17] = 0x52464E43; // a7 = RFENCE EID
+    cpu.regs[16] = 1;          // a6 = remote_sfence_vma (FID 1)
+
+    cpu.step(&mut bus);
+
+    assert_eq!(cpu.regs[10], 0, "RFENCE remote_sfence_vma should return SBI_SUCCESS");
+}
+
+#[test]
+fn test_sbi_probe_rfence() {
+    let mut bus = Bus::new(64 * 1024);
+    let ecall: u32 = 0x00000073;
+    bus.load_binary(&ecall.to_le_bytes(), 0);
+
+    let mut cpu = Cpu::new();
+    cpu.reset(DRAM_BASE);
+    cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
+    cpu.regs[17] = 0x10;       // a7 = Base extension
+    cpu.regs[16] = 3;          // a6 = sbi_probe_extension
+    cpu.regs[10] = 0x52464E43; // a0 = probe RFENCE
+
+    cpu.step(&mut bus);
+
+    assert_eq!(cpu.regs[10], 0, "Probe should return SBI_SUCCESS");
+    assert_eq!(cpu.regs[11], 1, "RFENCE extension should be available");
+}
+
+#[test]
+fn test_sbi_probe_srst() {
+    let mut bus = Bus::new(64 * 1024);
+    let ecall: u32 = 0x00000073;
+    bus.load_binary(&ecall.to_le_bytes(), 0);
+
+    let mut cpu = Cpu::new();
+    cpu.reset(DRAM_BASE);
+    cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
+    cpu.regs[17] = 0x10;       // a7 = Base extension
+    cpu.regs[16] = 3;          // a6 = sbi_probe_extension
+    cpu.regs[10] = 0x53525354; // a0 = probe SRST
+
+    cpu.step(&mut bus);
+
+    assert_eq!(cpu.regs[10], 0, "Probe should return SBI_SUCCESS");
+    assert_eq!(cpu.regs[11], 1, "SRST extension should be available");
+}
+
+// ============== UART THRE Interrupt ==============
+
+#[test]
+fn test_uart_thre_interrupt() {
+    let mut uart = microvm::devices::uart::Uart::new();
+    // Enable THRE interrupt
+    uart.write(1, 0x02); // IER = THRE
+    // UART starts with THRE set, so interrupt should be pending
+    assert!(uart.has_interrupt(), "THRE interrupt should be pending when TX is empty and IER_THRE set");
+}
+
+// ============== DTB Generation ==============
+
+#[test]
+fn test_dtb_contains_isa_extensions() {
+    let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "console=ttyS0", false);
+    // Check that the DTB contains the riscv,isa-extensions property
+    let dtb_str = String::from_utf8_lossy(&dtb);
+    assert!(dtb.windows(b"riscv,isa-extensions".len()).any(|w| w == b"riscv,isa-extensions"),
+        "DTB should contain riscv,isa-extensions property");
+}
+
+#[test]
+fn test_dtb_isa_string_includes_su() {
+    let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "", false);
+    assert!(dtb.windows(b"rv64imacsu".len()).any(|w| w == b"rv64imacsu"),
+        "DTB ISA string should be rv64imacsu");
+}
+
+// ============== FP CSR Stubs ==============
+
+#[test]
+fn test_fp_csrs_readable() {
+    let csrs = microvm::cpu::csr::CsrFile::new();
+    assert_eq!(csrs.read(csr::FFLAGS), 0);
+    assert_eq!(csrs.read(csr::FRM), 0);
+    assert_eq!(csrs.read(csr::FCSR), 0);
+}
+
+// ============== SENVCFG CSR ==============
+
+#[test]
+fn test_senvcfg_csr() {
+    let mut csrs = microvm::cpu::csr::CsrFile::new();
+    csrs.write(csr::SENVCFG, 0x42);
+    assert_eq!(csrs.read(csr::SENVCFG), 0x42);
+}

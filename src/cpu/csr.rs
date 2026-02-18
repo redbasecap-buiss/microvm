@@ -41,6 +41,15 @@ pub const CYCLE: u16 = 0xC00;
 pub const TIME: u16 = 0xC01;
 pub const INSTRET: u16 = 0xC02;
 
+// Floating-point CSRs (stubs — needed for Linux even without FPU)
+pub const FFLAGS: u16 = 0x001;
+pub const FRM: u16 = 0x002;
+pub const FCSR: u16 = 0x003;
+
+// Supervisor environment config (Linux probes this)
+pub const SENVCFG: u16 = 0x10A;
+pub const MENVCFG: u16 = 0x30A;
+
 // MSTATUS bit masks
 pub const MSTATUS_SIE: u64 = 1 << 1;
 pub const MSTATUS_MIE: u64 = 1 << 3;
@@ -50,6 +59,7 @@ pub const MSTATUS_SPP: u64 = 1 << 8;
 pub const MSTATUS_MPP: u64 = 3 << 11;
 pub const MSTATUS_SUM: u64 = 1 << 18;
 pub const MSTATUS_MXR: u64 = 1 << 19;
+pub const MSTATUS_FS: u64 = 3 << 13;  // Floating-point status field
 
 // SSTATUS mask — bits visible to S-mode
 const SSTATUS_MASK: u64 = MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP | MSTATUS_SUM | MSTATUS_MXR
@@ -148,6 +158,10 @@ impl CsrFile {
             0x3A3 => 0, // pmpcfg3 is not accessible on RV64
             // PMP address registers (0x3B0 - 0x3BF)
             0x3B0..=0x3BF => self.pmpaddr[(addr - 0x3B0) as usize],
+            // FP CSRs (stub — always 0, FPU not implemented)
+            FFLAGS | FRM | FCSR => 0,
+            // Environment config CSRs
+            SENVCFG | MENVCFG => self.regs.get(&addr).copied().unwrap_or(0),
             _ => self.regs.get(&addr).copied().unwrap_or(0),
         }
     }

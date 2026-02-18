@@ -485,7 +485,7 @@ fn handle_sbi_call(cpu: &mut Cpu, bus: &mut Bus) -> bool {
                 }
                 3 => { // sbi_probe_extension
                     let ext_id = a0;
-                    let available = matches!(ext_id, 0x00 | 0x01 | 0x02 | 0x10 | 0x54494D45 | 0x735049 | 0x48534D);
+                    let available = matches!(ext_id, 0x00 | 0x01 | 0x02 | 0x10 | 0x54494D45 | 0x735049 | 0x48534D | 0x52464E43 | 0x53525354);
                     cpu.regs[10] = 0;
                     cpu.regs[11] = if available { 1 } else { 0 };
                     true
@@ -559,6 +559,32 @@ fn handle_sbi_call(cpu: &mut Cpu, bus: &mut Bus) -> bool {
                 2 => { // hart_get_status
                     cpu.regs[10] = 0; // success
                     cpu.regs[11] = 0; // STARTED
+                    true
+                }
+                _ => {
+                    cpu.regs[10] = (-2i64) as u64;
+                    cpu.regs[11] = 0;
+                    true
+                }
+            }
+        }
+        0x52464E43 => {
+            // RFENCE extension — remote fence operations
+            // On a single-hart system these are all no-ops that succeed
+            match fid {
+                0 => { // remote_fence_i
+                    cpu.regs[10] = 0;
+                    cpu.regs[11] = 0;
+                    true
+                }
+                1 => { // remote_sfence_vma
+                    cpu.regs[10] = 0;
+                    cpu.regs[11] = 0;
+                    true
+                }
+                2 => { // remote_sfence_vma_asid
+                    cpu.regs[10] = 0;
+                    cpu.regs[11] = 0;
                     true
                 }
                 _ => {

@@ -78,6 +78,20 @@ impl DtbBuilder {
         self.write_u32(name_off);
     }
 
+    fn prop_stringlist(&mut self, name: &str, strings: &[&str]) {
+        let name_off = self.add_string(name);
+        let mut data = Vec::new();
+        for s in strings {
+            data.extend_from_slice(s.as_bytes());
+            data.push(0);
+        }
+        self.write_u32(FDT_PROP);
+        self.write_u32(data.len() as u32);
+        self.write_u32(name_off);
+        self.struct_buf.extend_from_slice(&data);
+        self.align4();
+    }
+
     fn prop_u32_array(&mut self, name: &str, vals: &[u32]) {
         let name_off = self.add_string(name);
         self.write_u32(FDT_PROP);
@@ -187,9 +201,11 @@ pub fn generate_dtb(ram_size: u64, cmdline: &str, has_virtio_blk: bool) -> Vec<u
     b.prop_str("device_type", "cpu");
     b.prop_u32("reg", 0);
     b.prop_str("compatible", "riscv");
-    b.prop_str("riscv,isa", "rv64imac");
+    b.prop_str("riscv,isa", "rv64imacsu");
     b.prop_str("mmu-type", "riscv,sv39");
     b.prop_str("status", "okay");
+    // ISA extensions as stringlist for newer kernels (Linux 6.2+)
+    b.prop_stringlist("riscv,isa-extensions", &["i", "m", "a", "c", "zicsr", "zifencei"]);
 
     b.begin_node("interrupt-controller");
     b.prop_u32("#interrupt-cells", 1);

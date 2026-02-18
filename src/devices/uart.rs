@@ -29,6 +29,7 @@ const LSR_TEMT: u8 = 1 << 6;  // Transmitter Empty
 
 // IER bits
 const IER_RDA: u8 = 1 << 0;   // Received Data Available
+const IER_THRE: u8 = 1 << 1;  // Transmitter Holding Register Empty
 
 impl Uart {
     pub fn new() -> Self {
@@ -59,7 +60,12 @@ impl Uart {
 
     /// Check if UART has a pending interrupt
     pub fn has_interrupt(&self) -> bool {
+        // RDA interrupt: data available and IER_RDA enabled
         if self.ier & IER_RDA != 0 && self.lsr & LSR_DR != 0 {
+            return true;
+        }
+        // THRE interrupt: transmitter empty and IER_THRE enabled
+        if self.ier & IER_THRE != 0 && self.lsr & LSR_THRE != 0 {
             return true;
         }
         false
@@ -83,8 +89,11 @@ impl Uart {
             }
             2 => {
                 // IIR — Interrupt Identification Register
+                // Priority: RLS > RDA > THRE > Modem
                 if self.lsr & LSR_DR != 0 && self.ier & IER_RDA != 0 {
-                    0x04 // RDA interrupt pending
+                    0x04 // RDA interrupt pending (priority 2)
+                } else if self.lsr & LSR_THRE != 0 && self.ier & IER_THRE != 0 {
+                    0x02 // THRE interrupt pending (priority 3)
                 } else {
                     0x01 // No interrupt pending
                 }
