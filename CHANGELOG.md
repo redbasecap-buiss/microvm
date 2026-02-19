@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.24.0 — VirtIO Network Device
+
+### Major Features
+- **VirtIO network device (virtio-net)**: Full VirtIO MMIO v2 network device implementation with MAC address, link status, RX/TX virtqueues, and feature negotiation (VIRTIO_NET_F_MAC, VIRTIO_NET_F_STATUS, VIRTIO_F_VERSION_1). Without a TAP backend, TX packets are consumed and dropped cleanly — Linux can probe and initialize the driver without errors. Default MAC: 52:54:00:12:34:56.
+- **DTB integration**: Network device added to device tree at MMIO address 0x10004000, IRQ 12, automatically discovered by Linux during boot.
+- **Bus routing**: New VIRTIO3 memory region (0x10004000-0x10004FFF) with full 8/16/32/64-bit read/write dispatch.
+
+### Improvements
+- 10 new VirtIO net tests covering MMIO registers, feature negotiation, MAC/status config reads, queue setup, interrupt acknowledge, and TX queue processing with descriptor chain walking.
+- VirtIO device count: 4 (block, console, RNG, network)
+
+### Stats
+- 217 tests passing (up from 197)
+- Full RV64IMACSU with Sv39/Sv48 MMU
+- VirtIO devices: block, console (hvc0), RNG (entropy), network
+
 ## v0.16.0 — Misaligned Access Support, UART THRE Fix, SBI Stubs
 
 ### Major Features

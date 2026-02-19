@@ -373,6 +373,22 @@ pub fn generate_dtb(
     b.prop_u32("interrupt-parent", 2);
     b.end_node();
 
+    // VirtIO MMIO Network Device
+    b.begin_node(&format!("virtio_mmio@{:x}", memory::VIRTIO3_BASE));
+    b.prop_str("compatible", "virtio,mmio");
+    b.prop_u32_array(
+        "reg",
+        &[
+            (memory::VIRTIO3_BASE >> 32) as u32,
+            memory::VIRTIO3_BASE as u32,
+            0,
+            memory::VIRTIO3_SIZE as u32,
+        ],
+    );
+    b.prop_u32_array("interrupts", &[12]);
+    b.prop_u32("interrupt-parent", 2);
+    b.end_node();
+
     b.end_node(); // soc
     b.end_node(); // root
 
