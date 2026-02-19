@@ -1789,13 +1789,7 @@ fn test_misaligned_store_word() {
 
     // Program: auipc x2, 0; li x3, 0x12345678 (via LUI+ADDI); sw x3, 0x101(x2)
     // li x3, 0x12345678: lui x3, 0x12345; addi x3, x3, 0x678
-    let prog: Vec<u32> = vec![
-        0x00000117,                                              // auipc x2, 0   → x2 = DRAM_BASE
-        0x123451B7,                                              // lui x3, 0x12345
-        0x67818193,                                              // addi x3, x3, 0x678
-        0x06312083u32.wrapping_add(0x10000000 - 0x10000000 + 0), // sw x3, 0x101(x2) — need proper encoding
-    ];
-    // Actually let me just set up registers directly and run one store
+    // Set up registers directly and run one store
     let base = DRAM_BASE;
     // addi x2, x0, 1; auipc x3, 0; add x2, x2, x3 → x2 = DRAM_BASE + 1
     // Then sw x4, 0(x2) where x4 = 0xDEADBEEF
@@ -2260,4 +2254,73 @@ fn test_zbc_clmulr() {
     let (cpu, _) = run_program_with_regs(&[clmulr], 1, &[(1, 1u64 << 63), (2, 1u64 << 63)]);
     // i=63: result ^= (1<<63) >> (63-63) = (1<<63) >> 0 = 1<<63
     assert_eq!(cpu.regs[3], 1u64 << 63, "CLMULR with high bits");
+}
+
+#[test]
+fn test_cbo_zero() {
+    // CBO.ZERO: opcode=0x0F, funct3=2, rs2=4 (bits 24:20), rd=0
+    // Encoding: funct7=0x02 (rs2=4 → bits 24:20 = 00100), rs1, funct3=2, rd=0, opcode=0x0F
+    // Full: 0000010 00100 rs1 010 00000 0001111
+    // With rs1=1: 0000010_00100_00001_010_00000_0001111
+    let cbo_zero: u32 = (0x04 << 20) | (1 << 15) | (2 << 12) | 0x0F;
+
+    // First, write known data to a 64-byte-aligned address in RAM
+    let target_offset = 256u64; // 64-byte aligned offset within RAM
+    let target_addr = DRAM_BASE + target_offset;
+
+    let mut bus = Bus::new(64 * 1024);
+    // Fill 64 bytes at target with 0xFF
+    for i in 0..64 {
+        bus.write8(target_addr + i, 0xFF);
+    }
+    // Verify data is there
+    assert_eq!(bus.read8(target_addr), 0xFF);
+
+    // Load CBO.ZERO instruction at start of RAM
+    let bytes = cbo_zero.to_le_bytes();
+    bus.load_binary(&bytes, 0);
+
+    let mut cpu = Cpu::new();
+    cpu.reset(DRAM_BASE);
+    cpu.regs[1] = target_addr; // rs1 = address to zero
+
+    cpu.step(&mut bus);
+
+    // Verify 64 bytes are now zero
+    for i in 0..64 {
+        assert_eq!(
+            bus.read8(target_addr + i),
+            0,
+            "CBO.ZERO should zero byte at offset {}",
+            i
+        );
+    }
+    assert_eq!(cpu.pc, DRAM_BASE + 4);
+}
+
+#[test]
+fn test_cbo_inval_clean_flush_nop() {
+    // CBO.INVAL (rs2=0), CBO.CLEAN (rs2=1), CBO.FLUSH (rs2=2)
+    // These should be NOPs — just advance PC
+    for (name, rs2_val) in [("INVAL", 0u32), ("CLEAN", 1), ("FLUSH", 2)] {
+        let cbo = (rs2_val << 20) | (1 << 15) | (2 << 12) | 0x0F;
+        let (cpu, _) = run_program_with_regs(&[cbo], 1, &[(1, DRAM_BASE + 256)]);
+        assert_eq!(cpu.pc, DRAM_BASE + 4, "CBO.{} should advance PC by 4", name);
+    }
+}
+
+#[test]
+fn test_fence_nop() {
+    // FENCE: funct3=0, opcode=0x0F
+    let fence = 0x0FF0000F_u32; // FENCE iorw, iorw
+    let (cpu, _) = run_program(&[fence], 1);
+    assert_eq!(cpu.pc, DRAM_BASE + 4);
+}
+
+#[test]
+fn test_fence_i_nop() {
+    // FENCE.I: funct3=1, opcode=0x0F
+    let fence_i = (1 << 12) | 0x0F;
+    let (cpu, _) = run_program(&[fence_i], 1);
+    assert_eq!(cpu.pc, DRAM_BASE + 4);
 }

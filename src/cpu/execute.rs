@@ -53,10 +53,7 @@ pub fn execute(cpu: &mut Cpu, bus: &mut Bus, raw: u32, inst_len: u64) -> bool {
         0x1B => op_imm32(cpu, &inst, inst_len),
         0x33 => op_reg(cpu, &inst, inst_len),
         0x3B => op_reg32(cpu, &inst, inst_len),
-        0x0F => {
-            // FENCE (funct3=0) and FENCE.I (funct3=1) — both NOPs in single-hart emulator
-            cpu.pc += inst_len;
-        }
+        0x0F => op_misc_mem(cpu, bus, &inst, inst_len),
         0x73 => return op_system(cpu, bus, &inst, inst_len),
         0x2F => op_atomic(cpu, bus, &inst, inst_len),
         _ => {
@@ -105,6 +102,59 @@ fn op_branch(cpu: &mut Cpu, inst: &Instruction, len: u64) {
     } else {
         cpu.pc += len;
     }
+}
+
+fn op_misc_mem(cpu: &mut Cpu, bus: &mut Bus, inst: &Instruction, len: u64) {
+    match inst.funct3 {
+        0 | 1 => {
+            // FENCE (funct3=0) and FENCE.I (funct3=1) — NOPs in single-hart emulator
+        }
+        2 => {
+            // Zicbom / Zicboz: CBO instructions
+            // The operation is encoded in bits [24:20] (rs2 field of the raw instruction)
+            let cbo_op = (inst.raw >> 20) & 0x1F;
+            match cbo_op {
+                0 => {} // CBO.INVAL — no cache, NOP
+                1 => {} // CBO.CLEAN — no cache, NOP
+                2 => {} // CBO.FLUSH — no cache, NOP
+                4 => {
+                    // CBO.ZERO (Zicboz) — zero a 64-byte cache block
+                    let base = cpu.regs[inst.rs1];
+                    let block_addr = base & !63; // Align to 64-byte block
+                                                 // Translate and zero 64 bytes
+                    if let Ok(phys) = cpu.mmu.translate(
+                        block_addr,
+                        crate::cpu::mmu::AccessType::Write,
+                        cpu.mode,
+                        &cpu.csrs,
+                        bus,
+                    ) {
+                        for i in 0..8 {
+                            bus.write64(phys + i * 8, 0);
+                        }
+                    } else {
+                        cpu.handle_exception(15, block_addr, bus); // Store/AMO page fault
+                        return;
+                    }
+                }
+                _ => {
+                    log::warn!("Unknown CBO operation {} at PC={:#x}", cbo_op, cpu.pc);
+                    cpu.handle_exception(2, inst.raw as u64, bus);
+                    return;
+                }
+            }
+        }
+        _ => {
+            log::warn!(
+                "Unknown MISC-MEM funct3={} at PC={:#x}",
+                inst.funct3,
+                cpu.pc
+            );
+            cpu.handle_exception(2, inst.raw as u64, bus);
+            return;
+        }
+    }
+    cpu.pc += len;
 }
 
 fn op_load(cpu: &mut Cpu, bus: &mut Bus, inst: &Instruction, len: u64) {
