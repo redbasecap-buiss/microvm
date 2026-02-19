@@ -41,7 +41,20 @@ fn clmulr(a: u64, b: u64) -> u64 {
 pub fn execute(cpu: &mut Cpu, bus: &mut Bus, raw: u32, inst_len: u64) -> bool {
     let inst = Instruction::decode(raw);
 
-    match inst.opcode {
+    // Check for floating-point opcodes first
+    let opcode = inst.opcode;
+    if matches!(opcode, 0x07 | 0x27 | 0x43 | 0x47 | 0x4B | 0x4F | 0x53) {
+        // FP load/store/compute — check FS != Off
+        if !cpu.csrs.fp_enabled() {
+            cpu.handle_exception(2, raw as u64, bus); // Illegal when FS=Off
+            return true;
+        }
+        if super::fpu::execute_fp(cpu, bus, raw, inst_len) {
+            return true;
+        }
+    }
+
+    match opcode {
         0x37 => op_lui(cpu, &inst, inst_len),
         0x17 => op_auipc(cpu, &inst, inst_len),
         0x6F => op_jal(cpu, &inst),

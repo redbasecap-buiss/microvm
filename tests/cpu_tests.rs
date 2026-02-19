@@ -1387,26 +1387,33 @@ fn test_hsm_hart_suspend() {
 }
 
 #[test]
-fn test_mstatus_fs_hardwired_zero() {
-    // When no FPU is present (MISA has no F/D), MSTATUS.FS must be hardwired to 0
-    let mut cpu = Cpu::new();
+fn test_mstatus_fs_with_fpu() {
+    // With F/D extensions present, FS should start as Initial (1)
+    let cpu = Cpu::new();
     let mstatus = cpu.csrs.read(csr::MSTATUS);
     let fs = (mstatus >> 13) & 3;
-    assert_eq!(fs, 0, "FS should be 0 (Off) with no FPU");
+    assert_eq!(fs, 1, "FS should be 1 (Initial) with FPU present");
 
-    // Try to set FS=1 (Initial) via MSTATUS write
-    cpu.csrs.write(csr::MSTATUS, mstatus | (1 << 13));
+    // FS should be writable (Dirty=3 sets SD bit)
+    let mut cpu = Cpu::new();
+    let mstatus = cpu.csrs.read(csr::MSTATUS);
+    cpu.csrs
+        .write(csr::MSTATUS, (mstatus & !(3 << 13)) | (3 << 13));
     let fs_after = (cpu.csrs.read(csr::MSTATUS) >> 13) & 3;
-    assert_eq!(fs_after, 0, "FS should remain 0 after write attempt");
+    assert_eq!(fs_after, 3, "FS should be writable to Dirty");
+    let sd = (cpu.csrs.read(csr::MSTATUS) >> 63) & 1;
+    assert_eq!(sd, 1, "SD bit should be set when FS=Dirty");
 
-    // Also try via SSTATUS write
+    // FS should also be visible and writable via SSTATUS
     let sstatus = cpu.csrs.read(csr::SSTATUS);
-    cpu.csrs.write(csr::SSTATUS, sstatus | (3 << 13));
-    let fs_via_sstatus = (cpu.csrs.read(csr::SSTATUS) >> 13) & 3;
-    assert_eq!(
-        fs_via_sstatus, 0,
-        "FS should remain 0 via SSTATUS write too"
-    );
+    let fs_via_sstatus = (sstatus >> 13) & 3;
+    assert_eq!(fs_via_sstatus, 3, "FS should be visible in SSTATUS");
+
+    // set_fs_dirty helper should work
+    let mut cpu2 = Cpu::new();
+    cpu2.csrs.set_fs_dirty();
+    let fs_dirty = (cpu2.csrs.read(csr::MSTATUS) >> 13) & 3;
+    assert_eq!(fs_dirty, 3, "set_fs_dirty should set FS=3");
 }
 
 #[test]
@@ -2379,4 +2386,364 @@ fn test_zihintpause() {
     let pause = 0x0100000Fu32;
     let (cpu, _) = run_program(&[pause], 1);
     assert_eq!(cpu.pc, DRAM_BASE + 4, "PAUSE should advance PC by 4");
+}
+
+// ==================== FPU (F/D extension) tests ====================
+
+#[test]
+fn test_fpu_fadd_s() {
+    // FADD.S f1, f2, f3: f1 = f2 + f3
+    // We need to load values into f-regs first via FMV.W.X
+    // FMV.W.X f2, x1: funct7=0x78, rs2=0, rs1=x1, rm=000, rd=f2 => opcode=0x53
+    // f2 = 3.0f (0x40400000), f3 = 2.0f (0x40000000)
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new(64 * 1024);
+    let base = DRAM_BASE;
+
+    // x1 = 3.0f bits
+    cpu.regs[1] = 0x40400000;
+    // FMV.W.X f2, x1: 0xF0008153 => funct7=0x78, rs2=0, rs1=1, rm=000, rd=2
+    let fmv_w_x_f2 = 0x78 << 25 | 0 << 20 | 1 << 15 | 0 << 12 | 2 << 7 | 0x53;
+    bus.write32(base, fmv_w_x_f2 as u32);
+
+    // x1 = 2.0f bits
+    // LUI x1, ... is complex. Let's just manually set fregs.
+    cpu.fregs[2] = 0xFFFFFFFF_40400000u64; // NaN-boxed 3.0f
+    cpu.fregs[3] = 0xFFFFFFFF_40000000u64; // NaN-boxed 2.0f
+
+    // FADD.S f1, f2, f3: funct7=0x00, rs2=3, rs1=2, rm=000, rd=1
+    let fadd_s = 0x00 << 25 | 3 << 20 | 2 << 15 | 0 << 12 | 1 << 7 | 0x53;
+    bus.write32(base, fadd_s as u32);
+    cpu.pc = base;
+    cpu.step(&mut bus);
+
+    let result = f32::from_bits(cpu.fregs[1] as u32);
+    assert_eq!(result, 5.0, "FADD.S: 3.0 + 2.0 = 5.0");
+}
+
+#[test]
+fn test_fpu_fsub_s() {
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new(64 * 1024);
+    cpu.fregs[2] = 0xFFFFFFFF_40A00000u64; // 5.0f
+    cpu.fregs[3] = 0xFFFFFFFF_40000000u64; // 2.0f
+
+    // FSUB.S f1, f2, f3: funct7=0x04
+    let fsub_s = 0x04 << 25 | 3 << 20 | 2 << 15 | 0 << 12 | 1 << 7 | 0x53;
+    bus.write32(DRAM_BASE, fsub_s as u32);
+    cpu.pc = DRAM_BASE;
+    cpu.step(&mut bus);
+    assert_eq!(f32::from_bits(cpu.fregs[1] as u32), 3.0);
+}
+
+#[test]
+fn test_fpu_fmul_s() {
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new(64 * 1024);
+    cpu.fregs[2] = 0xFFFFFFFF_40400000u64; // 3.0f
+    cpu.fregs[3] = 0xFFFFFFFF_40800000u64; // 4.0f
+
+    let fmul_s = 0x08 << 25 | 3 << 20 | 2 << 15 | 0 << 12 | 1 << 7 | 0x53;
+    bus.write32(DRAM_BASE, fmul_s as u32);
+    cpu.pc = DRAM_BASE;
+    cpu.step(&mut bus);
+    assert_eq!(f32::from_bits(cpu.fregs[1] as u32), 12.0);
+}
+
+#[test]
+fn test_fpu_fdiv_s() {
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new(64 * 1024);
+    cpu.fregs[2] = 0xFFFFFFFF_41200000u64; // 10.0f
+    cpu.fregs[3] = 0xFFFFFFFF_40000000u64; // 2.0f
+
+    let fdiv_s = 0x0C << 25 | 3 << 20 | 2 << 15 | 0 << 12 | 1 << 7 | 0x53;
+    bus.write32(DRAM_BASE, fdiv_s as u32);
+    cpu.pc = DRAM_BASE;
+    cpu.step(&mut bus);
+    assert_eq!(f32::from_bits(cpu.fregs[1] as u32), 5.0);
+}
+
+#[test]
+fn test_fpu_fadd_d() {
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new(64 * 1024);
+    cpu.fregs[2] = (3.0f64).to_bits();
+    cpu.fregs[3] = (2.0f64).to_bits();
+
+    // FADD.D: funct7=0x01
+    let fadd_d = 0x01 << 25 | 3 << 20 | 2 << 15 | 0 << 12 | 1 << 7 | 0x53;
+    bus.write32(DRAM_BASE, fadd_d as u32);
+    cpu.pc = DRAM_BASE;
+    cpu.step(&mut bus);
+    assert_eq!(f64::from_bits(cpu.fregs[1]), 5.0);
+}
+
+#[test]
+fn test_fpu_fmul_d() {
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new(64 * 1024);
+    cpu.fregs[2] = (3.0f64).to_bits();
+    cpu.fregs[3] = (4.0f64).to_bits();
+
+    let fmul_d = 0x09 << 25 | 3 << 20 | 2 << 15 | 0 << 12 | 1 << 7 | 0x53;
+    bus.write32(DRAM_BASE, fmul_d as u32);
+    cpu.pc = DRAM_BASE;
+    cpu.step(&mut bus);
+    assert_eq!(f64::from_bits(cpu.fregs[1]), 12.0);
+}
+
+#[test]
+fn test_fpu_fsqrt_d() {
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new(64 * 1024);
+    cpu.fregs[2] = (9.0f64).to_bits();
+
+    // FSQRT.D: funct7=0x2D, rs2=0
+    let fsqrt_d = 0x2D << 25 | 0 << 20 | 2 << 15 | 0 << 12 | 1 << 7 | 0x53;
+    bus.write32(DRAM_BASE, fsqrt_d as u32);
+    cpu.pc = DRAM_BASE;
+    cpu.step(&mut bus);
+    assert_eq!(f64::from_bits(cpu.fregs[1]), 3.0);
+}
+
+#[test]
+fn test_fpu_fmv_w_x_and_x_w() {
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new(64 * 1024);
+
+    // FMV.W.X f1, x2: move integer bits to FP reg
+    cpu.regs[2] = 0x40400000; // 3.0f bits
+    let fmv_w_x = 0x78 << 25 | 0 << 20 | 2 << 15 | 0 << 12 | 1 << 7 | 0x53;
+    bus.write32(DRAM_BASE, fmv_w_x as u32);
+    cpu.pc = DRAM_BASE;
+    cpu.step(&mut bus);
+    assert_eq!(cpu.fregs[1] as u32, 0x40400000, "FMV.W.X should move bits");
+    assert_eq!(cpu.fregs[1] >> 32, 0xFFFFFFFF, "Should be NaN-boxed");
+
+    // FMV.X.W x3, f1: move FP bits to integer reg
+    let fmv_x_w = 0x70 << 25 | 0 << 20 | 1 << 15 | 0 << 12 | 3 << 7 | 0x53;
+    bus.write32(DRAM_BASE + 4, fmv_x_w as u32);
+    cpu.step(&mut bus);
+    // FMV.X.W sign-extends the 32-bit value
+    assert_eq!(cpu.regs[3], 0x40400000, "FMV.X.W should extract bits");
+}
+
+#[test]
+fn test_fpu_fmv_d_x_and_x_d() {
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new(64 * 1024);
+
+    // FMV.D.X f1, x2
+    cpu.regs[2] = (3.14f64).to_bits();
+    let fmv_d_x = 0x79 << 25 | 0 << 20 | 2 << 15 | 0 << 12 | 1 << 7 | 0x53;
+    bus.write32(DRAM_BASE, fmv_d_x as u32);
+    cpu.pc = DRAM_BASE;
+    cpu.step(&mut bus);
+    assert_eq!(f64::from_bits(cpu.fregs[1]), 3.14);
+
+    // FMV.X.D x3, f1
+    let fmv_x_d = 0x71 << 25 | 0 << 20 | 1 << 15 | 0 << 12 | 3 << 7 | 0x53;
+    bus.write32(DRAM_BASE + 4, fmv_x_d as u32);
+    cpu.step(&mut bus);
+    assert_eq!(cpu.regs[3], (3.14f64).to_bits());
+}
+
+#[test]
+fn test_fpu_fcvt_s_w_and_w_s() {
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new(64 * 1024);
+
+    // FCVT.S.W f1, x2: convert i32 to f32
+    cpu.regs[2] = 42u64;
+    let fcvt_s_w = 0x68 << 25 | 0 << 20 | 2 << 15 | 0 << 12 | 1 << 7 | 0x53;
+    bus.write32(DRAM_BASE, fcvt_s_w as u32);
+    cpu.pc = DRAM_BASE;
+    cpu.step(&mut bus);
+    assert_eq!(f32::from_bits(cpu.fregs[1] as u32), 42.0);
+
+    // FCVT.W.S x3, f1: convert f32 to i32
+    let fcvt_w_s = 0x60 << 25 | 0 << 20 | 1 << 15 | 0 << 12 | 3 << 7 | 0x53;
+    bus.write32(DRAM_BASE + 4, fcvt_w_s as u32);
+    cpu.step(&mut bus);
+    assert_eq!(cpu.regs[3] as i32, 42);
+}
+
+#[test]
+fn test_fpu_feq_flt_fle_d() {
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new(64 * 1024);
+    cpu.fregs[2] = (3.0f64).to_bits();
+    cpu.fregs[3] = (5.0f64).to_bits();
+
+    // FEQ.D x1, f2, f3: funct7=0x51, rm=2
+    let feq_d = 0x51 << 25 | 3 << 20 | 2 << 15 | 2 << 12 | 1 << 7 | 0x53;
+    bus.write32(DRAM_BASE, feq_d as u32);
+    cpu.pc = DRAM_BASE;
+    cpu.step(&mut bus);
+    assert_eq!(cpu.regs[1], 0, "3.0 != 5.0");
+
+    // FLT.D x1, f2, f3: rm=1
+    let flt_d = 0x51 << 25 | 3 << 20 | 2 << 15 | 1 << 12 | 1 << 7 | 0x53;
+    bus.write32(DRAM_BASE + 4, flt_d as u32);
+    cpu.step(&mut bus);
+    assert_eq!(cpu.regs[1], 1, "3.0 < 5.0");
+
+    // FLE.D x1, f2, f3: rm=0
+    let fle_d = 0x51 << 25 | 3 << 20 | 2 << 15 | 0 << 12 | 1 << 7 | 0x53;
+    bus.write32(DRAM_BASE + 8, fle_d as u32);
+    cpu.step(&mut bus);
+    assert_eq!(cpu.regs[1], 1, "3.0 <= 5.0");
+}
+
+#[test]
+fn test_fpu_fclass_d() {
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new(64 * 1024);
+
+    // +normal
+    cpu.fregs[1] = (1.0f64).to_bits();
+    let fclass_d = 0x71 << 25 | 0 << 20 | 1 << 15 | 1 << 12 | 2 << 7 | 0x53;
+    bus.write32(DRAM_BASE, fclass_d as u32);
+    cpu.pc = DRAM_BASE;
+    cpu.step(&mut bus);
+    assert_eq!(cpu.regs[2], 1 << 6, "positive normal = bit 6");
+
+    // -inf
+    cpu.fregs[1] = f64::NEG_INFINITY.to_bits();
+    cpu.pc = DRAM_BASE;
+    cpu.step(&mut bus);
+    assert_eq!(cpu.regs[2], 1 << 0, "-inf = bit 0");
+
+    // +inf
+    cpu.fregs[1] = f64::INFINITY.to_bits();
+    cpu.pc = DRAM_BASE;
+    cpu.step(&mut bus);
+    assert_eq!(cpu.regs[2], 1 << 7, "+inf = bit 7");
+}
+
+#[test]
+fn test_fpu_fcvt_d_s_and_s_d() {
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new(64 * 1024);
+
+    // FCVT.D.S f1, f2: convert f32 to f64
+    cpu.fregs[2] = 0xFFFFFFFF_40490FDBu64; // pi as f32, NaN-boxed
+    let fcvt_d_s = 0x21 << 25 | 0 << 20 | 2 << 15 | 0 << 12 | 1 << 7 | 0x53;
+    bus.write32(DRAM_BASE, fcvt_d_s as u32);
+    cpu.pc = DRAM_BASE;
+    cpu.step(&mut bus);
+    let d = f64::from_bits(cpu.fregs[1]);
+    assert!(
+        (d - std::f64::consts::PI).abs() < 0.001,
+        "FCVT.D.S pi conversion"
+    );
+
+    // FCVT.S.D f3, f1: convert f64 back to f32
+    let fcvt_s_d = 0x20 << 25 | 1 << 20 | 1 << 15 | 0 << 12 | 3 << 7 | 0x53;
+    bus.write32(DRAM_BASE + 4, fcvt_s_d as u32);
+    cpu.step(&mut bus);
+    let s = f32::from_bits(cpu.fregs[3] as u32);
+    assert!(
+        (s - std::f32::consts::PI).abs() < 0.0001,
+        "FCVT.S.D pi roundtrip"
+    );
+}
+
+#[test]
+fn test_fpu_fmadd_d() {
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new(64 * 1024);
+    cpu.fregs[1] = (2.0f64).to_bits();
+    cpu.fregs[2] = (3.0f64).to_bits();
+    cpu.fregs[3] = (1.0f64).to_bits();
+
+    // FMADD.D f4, f1, f2, f3: f4 = f1*f2 + f3 = 7.0
+    // opcode=0x43, fmt=01(D), rs3=f3
+    let fmadd_d = (3 << 27) | (1 << 25) | (2 << 20) | (1 << 15) | (0 << 12) | (4 << 7) | 0x43;
+    bus.write32(DRAM_BASE, fmadd_d as u32);
+    cpu.pc = DRAM_BASE;
+    cpu.step(&mut bus);
+    assert_eq!(f64::from_bits(cpu.fregs[4]), 7.0);
+}
+
+#[test]
+fn test_fpu_fsgnj_d() {
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new(64 * 1024);
+    cpu.fregs[1] = (3.0f64).to_bits();
+    cpu.fregs[2] = (-1.0f64).to_bits();
+
+    // FSGNJ.D f3, f1, f2 (copy sign of f2 to f1): funct7=0x11, rm=0
+    let fsgnj_d = 0x11 << 25 | 2 << 20 | 1 << 15 | 0 << 12 | 3 << 7 | 0x53;
+    bus.write32(DRAM_BASE, fsgnj_d as u32);
+    cpu.pc = DRAM_BASE;
+    cpu.step(&mut bus);
+    assert_eq!(
+        f64::from_bits(cpu.fregs[3]),
+        -3.0,
+        "FSGNJ.D should copy sign"
+    );
+}
+
+#[test]
+fn test_fpu_flw_fsw() {
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new(64 * 1024);
+    let addr = DRAM_BASE + 0x100;
+
+    // Store 42.0f at memory
+    bus.write32(addr, (42.0f32).to_bits());
+
+    // FLW f1, 0x100(x0): opcode=0x07, funct3=2
+    // x2 = DRAM_BASE
+    cpu.regs[2] = DRAM_BASE;
+    let flw = (0x100 << 20) | (2 << 15) | (2 << 12) | (1 << 7) | 0x07;
+    bus.write32(DRAM_BASE, flw as u32);
+    cpu.pc = DRAM_BASE;
+    cpu.step(&mut bus);
+    assert_eq!(f32::from_bits(cpu.fregs[1] as u32), 42.0);
+
+    // FSW f1, 0x200(x2): opcode=0x27, funct3=2
+    let offset = 0x200u32;
+    let imm11_5 = (offset >> 5) & 0x7F;
+    let imm4_0 = offset & 0x1F;
+    let fsw = (imm11_5 << 25) | (1 << 20) | (2 << 15) | (2 << 12) | (imm4_0 << 7) | 0x27;
+    bus.write32(DRAM_BASE + 4, fsw);
+    cpu.step(&mut bus);
+    assert_eq!(bus.read32(DRAM_BASE + 0x200), (42.0f32).to_bits());
+}
+
+#[test]
+fn test_fpu_fld_fsd() {
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new(64 * 1024);
+    let addr = DRAM_BASE + 0x100;
+
+    bus.write64(addr, (99.99f64).to_bits());
+
+    cpu.regs[2] = DRAM_BASE;
+    // FLD f1, 0x100(x2): opcode=0x07, funct3=3
+    let fld = (0x100 << 20) | (2 << 15) | (3 << 12) | (1 << 7) | 0x07;
+    bus.write32(DRAM_BASE, fld as u32);
+    cpu.pc = DRAM_BASE;
+    cpu.step(&mut bus);
+    assert_eq!(f64::from_bits(cpu.fregs[1]), 99.99);
+
+    // FSD f1, 0x200(x2)
+    let offset = 0x200u32;
+    let imm11_5 = (offset >> 5) & 0x7F;
+    let imm4_0 = offset & 0x1F;
+    let fsd = (imm11_5 << 25) | (1 << 20) | (2 << 15) | (3 << 12) | (imm4_0 << 7) | 0x27;
+    bus.write32(DRAM_BASE + 4, fsd);
+    cpu.step(&mut bus);
+    assert_eq!(bus.read64(DRAM_BASE + 0x200), (99.99f64).to_bits());
+}
+
+#[test]
+fn test_misa_has_f_d() {
+    let cpu = Cpu::new();
+    let misa = cpu.csrs.read(csr::MISA);
+    assert_ne!(misa & (1 << 5), 0, "MISA should have F bit set");
+    assert_ne!(misa & (1 << 3), 0, "MISA should have D bit set");
 }

@@ -88,11 +88,9 @@ pub const MSTATUS_MXR: u64 = 1 << 19;
 pub const MSTATUS_FS: u64 = 3 << 13; // Floating-point status field
 
 // SSTATUS mask — bits visible to S-mode
-// Note: FS (bits 14:13) is excluded because MISA has no F/D extensions.
-// When no FPU is present, FS must be hardwired to 0 (Off) per RISC-V spec.
-// Including FS here would make Linux think FPU exists and crash on FP instructions.
 const SSTATUS_MASK: u64 = MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP | MSTATUS_SUM | MSTATUS_MXR
-    | (3 << 32) // UXL
+    | MSTATUS_FS  // FP status (F/D extensions present)
+    | (3 << 32)   // UXL
     | (1 << 63); // SD
 
 pub struct CsrFile {
@@ -135,18 +133,20 @@ impl CsrFile {
             pmpaddr: [0; 16],
             mtime: 0,
         };
-        // MISA: RV64IMACSU
+        // MISA: RV64IMAFDCSU (G = IMAFD + Zicsr + Zifencei)
         let misa = (2u64 << 62)  // MXL = 64-bit
             | (1 << 0)   // A - Atomic
             | (1 << 2)   // C - Compressed
+            | (1 << 3)   // D - Double-precision float
+            | (1 << 5)   // F - Single-precision float
             | (1 << 8)   // I - Integer
             | (1 << 12)  // M - Multiply/Divide
             | (1 << 18)  // S - Supervisor mode
             | (1 << 20); // U - User mode
         csrs.regs.insert(MISA, misa);
         csrs.regs.insert(MHARTID, 0);
-        // MSTATUS: set UXL=2 (64-bit) and SXL=2 (64-bit)
-        let mstatus = (2u64 << 32) | (2u64 << 34); // UXL | SXL
+        // MSTATUS: set UXL=2 (64-bit), SXL=2 (64-bit), FS=1 (Initial)
+        let mstatus = (2u64 << 32) | (2u64 << 34) | (1u64 << 13); // UXL | SXL | FS=Initial
         csrs.regs.insert(MSTATUS, mstatus);
         // Read-only zero registers
         csrs.regs.insert(MVENDORID, 0);
@@ -197,6 +197,23 @@ impl CsrFile {
         self.mtime >= stimecmp
     }
 
+    /// Mark floating-point state as Dirty (FS=3) in mstatus, and set SD bit
+    pub fn set_fs_dirty(&mut self) {
+        let mut mstatus = self.regs.get(&MSTATUS).copied().unwrap_or(0);
+        let fs = (mstatus >> 13) & 3;
+        if fs != 3 {
+            mstatus = (mstatus & !MSTATUS_FS) | (3u64 << 13); // FS = Dirty
+            mstatus |= 1u64 << 63; // SD
+            self.regs.insert(MSTATUS, mstatus);
+        }
+    }
+
+    /// Check if FP instructions are allowed (FS != 0/Off)
+    pub fn fp_enabled(&self) -> bool {
+        let mstatus = self.regs.get(&MSTATUS).copied().unwrap_or(0);
+        ((mstatus >> 13) & 3) != 0
+    }
+
     pub fn read(&self, addr: u16) -> u64 {
         match addr {
             // User-level counter CSRs (read-only shadows)
@@ -222,8 +239,10 @@ impl CsrFile {
             0x3A3 => 0, // pmpcfg3 is not accessible on RV64
             // PMP address registers (0x3B0 - 0x3BF)
             0x3B0..=0x3BF => self.pmpaddr[(addr - 0x3B0) as usize],
-            // FP CSRs (stub — always 0, FPU not implemented)
-            FFLAGS | FRM | FCSR => 0,
+            // FP CSRs
+            FFLAGS => self.regs.get(&FCSR).copied().unwrap_or(0) & 0x1F,
+            FRM => (self.regs.get(&FCSR).copied().unwrap_or(0) >> 5) & 0x7,
+            FCSR => self.regs.get(&FCSR).copied().unwrap_or(0) & 0xFF,
             // Environment config CSRs
             SENVCFG => self.regs.get(&SENVCFG).copied().unwrap_or(0),
             MENVCFG => self.regs.get(&MENVCFG).copied().unwrap_or(0),
@@ -260,10 +279,17 @@ impl CsrFile {
                 self.regs.insert(MIP, (mip & !writable) | (val & writable));
             }
             MSTATUS => {
-                // Preserve read-only fields: SXL, UXL, and FS (hardwired 0, no FPU)
+                // Preserve read-only fields: SXL, UXL
                 let old = self.regs.get(&MSTATUS).copied().unwrap_or(0);
-                let readonly_mask = (3u64 << 32) | (3u64 << 34) | MSTATUS_FS;
-                let new_val = (val & !readonly_mask) | (old & readonly_mask);
+                let readonly_mask = (3u64 << 32) | (3u64 << 34); // SXL | UXL
+                let mut new_val = (val & !readonly_mask) | (old & readonly_mask);
+                // SD (bit 63) is read-only: set when FS=3 (Dirty)
+                let fs = (new_val >> 13) & 3;
+                if fs == 3 {
+                    new_val |= 1u64 << 63;
+                } else {
+                    new_val &= !(1u64 << 63);
+                }
                 self.regs.insert(MSTATUS, new_val);
             }
             // PMP config registers
@@ -273,6 +299,19 @@ impl CsrFile {
             0x3A3 => {}
             // PMP address registers
             0x3B0..=0x3BF => self.pmpaddr[(addr - 0x3B0) as usize] = val,
+            // FP CSR writes
+            FFLAGS => {
+                let old_fcsr = self.regs.get(&FCSR).copied().unwrap_or(0);
+                self.regs.insert(FCSR, (old_fcsr & !0x1F) | (val & 0x1F));
+            }
+            FRM => {
+                let old_fcsr = self.regs.get(&FCSR).copied().unwrap_or(0);
+                self.regs
+                    .insert(FCSR, (old_fcsr & !0xE0) | ((val & 0x7) << 5));
+            }
+            FCSR => {
+                self.regs.insert(FCSR, val & 0xFF);
+            }
             // HPM counters and event selectors — writable but no effect
             0xB03..=0xB1F | 0x323..=0x33F => {}
             MENVCFGH => {} // RV64: writes ignored

@@ -80,8 +80,10 @@ pub fn expand_compressed(inst: u32) -> u32 {
     match op {
         0 => match funct3 {
             0 => expand_c_addi4spn(inst),
+            1 => expand_c_fld(inst), // C.FLD
             2 => expand_c_lw(inst),
             3 => expand_c_ld(inst),
+            5 => expand_c_fsd(inst), // C.FSD
             6 => expand_c_sw(inst),
             7 => expand_c_sd(inst),
             _ => 0,
@@ -106,9 +108,11 @@ pub fn expand_compressed(inst: u32) -> u32 {
         },
         2 => match funct3 {
             0 => expand_c_slli(inst),
+            1 => expand_c_fldsp(inst), // C.FLDSP
             2 => expand_c_lwsp(inst),
             3 => expand_c_ldsp(inst),
             4 => expand_c_jr_mv_add(inst),
+            5 => expand_c_fsdsp(inst), // C.FSDSP
             6 => expand_c_swsp(inst),
             7 => expand_c_sdsp(inst),
             _ => 0,
@@ -354,4 +358,41 @@ fn expand_c_sdsp(inst: u32) -> u32 {
     let imm11_5 = (offset >> 5) & 0x7F;
     let imm4_0 = offset & 0x1F;
     (imm11_5 << 25) | (rs2 << 20) | (2 << 15) | (3 << 12) | (imm4_0 << 7) | 0x23
+}
+
+// === Compressed floating-point instructions (RV64DC) ===
+
+/// C.FLD: FLD rd', offset(rs1') — same encoding as C.LD but opcode=0x07 (FP load)
+fn expand_c_fld(inst: u32) -> u32 {
+    let offset = ((inst >> 10) & 0x7) << 3 | ((inst >> 5) & 0x3) << 6;
+    let rs1 = c_rs1_prime(inst);
+    let rd = c_rd_prime(inst);
+    (offset << 20) | (rs1 << 15) | (3 << 12) | (rd << 7) | 0x07
+}
+
+/// C.FSD: FSD rs2', offset(rs1')
+fn expand_c_fsd(inst: u32) -> u32 {
+    let offset = ((inst >> 10) & 0x7) << 3 | ((inst >> 5) & 0x3) << 6;
+    let rs1 = c_rs1_prime(inst);
+    let rs2 = c_rd_prime(inst);
+    let imm11_5 = (offset >> 5) & 0x7F;
+    let imm4_0 = offset & 0x1F;
+    (imm11_5 << 25) | (rs2 << 20) | (rs1 << 15) | (3 << 12) | (imm4_0 << 7) | 0x27
+}
+
+/// C.FLDSP: FLD rd, offset(x2)
+fn expand_c_fldsp(inst: u32) -> u32 {
+    let rd = (inst >> 7) & 0x1F;
+    let offset =
+        (((inst >> 12) & 0x1) << 5) | (((inst >> 5) & 0x3) << 3) | (((inst >> 2) & 0x7) << 6);
+    (offset << 20) | (2 << 15) | (3 << 12) | (rd << 7) | 0x07
+}
+
+/// C.FSDSP: FSD rs2, offset(x2)
+fn expand_c_fsdsp(inst: u32) -> u32 {
+    let rs2 = (inst >> 2) & 0x1F;
+    let offset = (((inst >> 10) & 0x7) << 3) | (((inst >> 7) & 0x7) << 6);
+    let imm11_5 = (offset >> 5) & 0x7F;
+    let imm4_0 = offset & 0x1F;
+    (imm11_5 << 25) | (rs2 << 20) | (2 << 15) | (3 << 12) | (imm4_0 << 7) | 0x27
 }

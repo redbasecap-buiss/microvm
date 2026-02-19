@@ -1,6 +1,7 @@
 pub mod csr;
 pub mod decode;
 pub mod execute;
+pub mod fpu;
 pub mod mmu;
 
 use crate::memory::Bus;
@@ -30,6 +31,8 @@ impl PrivilegeMode {
 pub struct Cpu {
     /// General-purpose registers x0-x31
     pub regs: [u64; 32],
+    /// Floating-point registers f0-f31 (IEEE 754 double stored as u64 bits)
+    pub fregs: [u64; 32],
     /// Program counter
     pub pc: u64,
     /// CSR file
@@ -56,6 +59,7 @@ impl Cpu {
     pub fn new() -> Self {
         Self {
             regs: [0; 32],
+            fregs: [0; 32],
             pc: 0,
             csrs: CsrFile::new(),
             mode: PrivilegeMode::Machine,
@@ -69,6 +73,7 @@ impl Cpu {
     /// Reset CPU, set PC to reset vector
     pub fn reset(&mut self, pc: u64) {
         self.regs = [0; 32];
+        self.fregs = [0; 32];
         self.pc = pc;
         self.mode = PrivilegeMode::Machine;
         self.wfi = false;
