@@ -1728,3 +1728,232 @@ fn test_hpm_event_selector_writes_ignored() {
         );
     }
 }
+
+// ============== Misaligned Memory Access ==============
+
+#[test]
+fn test_misaligned_load_halfword() {
+    // Store 0xBEEF at an odd address, then load it back with LH
+    let mut bus = Bus::new(64 * 1024);
+    // Write 0xEF at offset 1, 0xBE at offset 2 (little-endian)
+    let base = DRAM_BASE;
+    bus.write8(base + 1, 0xEF);
+    bus.write8(base + 2, 0xBE);
+
+    // Program: auipc x2, 0 (get DRAM_BASE); addi x2, x2, 1; lh x1, 0(x2)
+    // Use direct: load from x2+1 where x2 = DRAM_BASE
+    // auipc x2, 0 → x2 = DRAM_BASE + 0 (but program starts at DRAM_BASE)
+    // We need to load from DRAM_BASE+1. Since program is at DRAM_BASE, we offset data.
+    // Place data at offset 0x100, program at 0
+    bus.write8(base + 0x101, 0xEF);
+    bus.write8(base + 0x102, 0xBE);
+
+    // auipc x2, 0 → x2 = DRAM_BASE
+    // lh x1, 0x101(x2) → load halfword from DRAM_BASE+0x101 (misaligned)
+    let prog: Vec<u32> = vec![
+        0x00000117, // auipc x2, 0
+        0x10111083, // lh x1, 0x101(x2)
+    ];
+    let bytes: Vec<u8> = prog.iter().flat_map(|i| i.to_le_bytes()).collect();
+    bus.load_binary(&bytes, 0);
+
+    let mut cpu = Cpu::new();
+    cpu.reset(DRAM_BASE);
+    cpu.step(&mut bus);
+    cpu.step(&mut bus);
+    assert_eq!(cpu.regs[1] as u16, 0xBEEF, "Misaligned LH should work");
+}
+
+#[test]
+fn test_misaligned_store_word() {
+    // Store a word at a misaligned address and verify byte-by-byte
+    let mut bus = Bus::new(64 * 1024);
+
+    // Program: auipc x2, 0; li x3, 0x12345678 (via LUI+ADDI); sw x3, 0x101(x2)
+    // li x3, 0x12345678: lui x3, 0x12345; addi x3, x3, 0x678
+    let prog: Vec<u32> = vec![
+        0x00000117,                                              // auipc x2, 0   → x2 = DRAM_BASE
+        0x123451B7,                                              // lui x3, 0x12345
+        0x67818193,                                              // addi x3, x3, 0x678
+        0x06312083u32.wrapping_add(0x10000000 - 0x10000000 + 0), // sw x3, 0x101(x2) — need proper encoding
+    ];
+    // Actually let me just set up registers directly and run one store
+    let base = DRAM_BASE;
+    // addi x2, x0, 1; auipc x3, 0; add x2, x2, x3 → x2 = DRAM_BASE + 1
+    // Then sw x4, 0(x2) where x4 = 0xDEADBEEF
+    // Easier: set up via direct register writes
+    let mut cpu = Cpu::new();
+    cpu.reset(base);
+    cpu.regs[2] = base + 0x101; // misaligned target
+    cpu.regs[3] = 0xDEAD_BEEF;
+
+    // SW x3, 0(x2) → opcode=0x23, funct3=2, rs1=x2, rs2=x3, imm=0
+    // Encoding: [imm[11:5]] [rs2] [rs1] [funct3] [imm[4:0]] [opcode]
+    // = 0000000 00011 00010 010 00000 0100011
+    // = 0x00312023
+    let inst_bytes: Vec<u8> = 0x00312023u32.to_le_bytes().to_vec();
+    bus.load_binary(&inst_bytes, 0);
+
+    cpu.step(&mut bus);
+
+    // Verify bytes at DRAM_BASE + 0x101
+    assert_eq!(bus.read8(base + 0x101), 0xEF);
+    assert_eq!(bus.read8(base + 0x102), 0xBE);
+    assert_eq!(bus.read8(base + 0x103), 0xAD);
+    assert_eq!(bus.read8(base + 0x104), 0xDE);
+}
+
+#[test]
+fn test_misaligned_load_word() {
+    let mut bus = Bus::new(64 * 1024);
+    let base = DRAM_BASE;
+
+    // Write 0xCAFEBABE at misaligned address
+    bus.write8(base + 0x101, 0xBE);
+    bus.write8(base + 0x102, 0xBA);
+    bus.write8(base + 0x103, 0xFE);
+    bus.write8(base + 0x104, 0xCA);
+
+    let mut cpu = Cpu::new();
+    cpu.reset(base);
+    cpu.regs[2] = base + 0x101; // misaligned source
+
+    // LW x1, 0(x2) → 0x00012083
+    let inst_bytes: Vec<u8> = 0x00012083u32.to_le_bytes().to_vec();
+    bus.load_binary(&inst_bytes, 0);
+
+    cpu.step(&mut bus);
+
+    // LW sign-extends from 32 bits
+    assert_eq!(
+        cpu.regs[1], 0xFFFFFFFF_CAFEBABE_u64,
+        "Misaligned LW should work and sign-extend"
+    );
+}
+
+#[test]
+fn test_misaligned_load_doubleword() {
+    let mut bus = Bus::new(64 * 1024);
+    let base = DRAM_BASE;
+
+    // Write 0x123456789ABCDEF0 at misaligned address
+    let val: u64 = 0x123456789ABCDEF0;
+    for i in 0..8 {
+        bus.write8(base + 0x103 + i, ((val >> (i * 8)) & 0xFF) as u8);
+    }
+
+    let mut cpu = Cpu::new();
+    cpu.reset(base);
+    cpu.regs[2] = base + 0x103; // misaligned source
+
+    // LD x1, 0(x2) → 0x00013083
+    let inst_bytes: Vec<u8> = 0x00013083u32.to_le_bytes().to_vec();
+    bus.load_binary(&inst_bytes, 0);
+
+    cpu.step(&mut bus);
+
+    assert_eq!(
+        cpu.regs[1], val,
+        "Misaligned LD should correctly read all 8 bytes"
+    );
+}
+
+// ============== UART THRE Interrupt Behavior ==============
+
+#[test]
+fn test_uart_thre_cleared_on_iir_read() {
+    use microvm::devices::uart::Uart;
+    let mut uart = Uart::new();
+
+    // Enable THRE interrupt
+    uart.write(1, 0x02); // IER = THRE enabled
+
+    // Initially THRE should be pending (transmitter is empty)
+    assert!(uart.has_interrupt(), "THRE should be pending initially");
+
+    // Read IIR (mutable) — should report THRE and clear it
+    let iir = uart.read_mut(2);
+    assert_eq!(iir & 0x0F, 0x02, "IIR should report THRE interrupt");
+
+    // After reading IIR, THRE should no longer be pending
+    assert!(
+        !uart.has_interrupt(),
+        "THRE should be cleared after IIR read"
+    );
+
+    // Write a character — should re-arm THRE
+    uart.write(0, b'A' as u64);
+    assert!(
+        uart.has_interrupt(),
+        "THRE should be re-armed after THR write"
+    );
+}
+
+#[test]
+fn test_uart_ier_enable_triggers_thre() {
+    use microvm::devices::uart::Uart;
+    let mut uart = Uart::new();
+
+    // Clear THRE pending by reading IIR first with THRE enabled
+    uart.write(1, 0x02);
+    uart.read_mut(2);
+    assert!(!uart.has_interrupt());
+
+    // Disable THRE interrupt
+    uart.write(1, 0x00);
+    assert!(!uart.has_interrupt());
+
+    // Re-enable THRE interrupt — should trigger since THR is empty
+    uart.write(1, 0x02);
+    assert!(
+        uart.has_interrupt(),
+        "Enabling THRE in IER when THR empty should trigger interrupt"
+    );
+}
+
+// ============== SBI Extension Stubs ==============
+
+#[test]
+fn test_sbi_cppc_returns_not_supported() {
+    // CPPC extension (EID=0x43505043) should return SBI_ERR_NOT_SUPPORTED
+    let mut bus = Bus::new(64 * 1024);
+    let mut cpu = Cpu::new();
+    cpu.reset(DRAM_BASE);
+    cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
+
+    // Set up ECALL: a7=EID, a6=FID
+    cpu.regs[17] = 0x43505043; // CPPC
+    cpu.regs[16] = 0; // FID 0
+
+    // ECALL instruction
+    let bytes: Vec<u8> = 0x00000073u32.to_le_bytes().to_vec();
+    bus.load_binary(&bytes, 0);
+
+    cpu.step(&mut bus);
+
+    assert_eq!(
+        cpu.regs[10] as i64, -2,
+        "CPPC should return SBI_ERR_NOT_SUPPORTED"
+    );
+}
+
+#[test]
+fn test_sbi_fwft_returns_not_supported() {
+    let mut bus = Bus::new(64 * 1024);
+    let mut cpu = Cpu::new();
+    cpu.reset(DRAM_BASE);
+    cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
+
+    cpu.regs[17] = 0x46574654; // FWFT
+    cpu.regs[16] = 0;
+
+    let bytes: Vec<u8> = 0x00000073u32.to_le_bytes().to_vec();
+    bus.load_binary(&bytes, 0);
+
+    cpu.step(&mut bus);
+
+    assert_eq!(
+        cpu.regs[10] as i64, -2,
+        "FWFT should return SBI_ERR_NOT_SUPPORTED"
+    );
+}

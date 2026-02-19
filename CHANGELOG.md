@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.16.0 — Misaligned Access Support, UART THRE Fix, SBI Stubs
+
+### Major Features
+- **Misaligned memory access emulation**: LH/LHU/LW/LWU/LD/SH/SW/SD now handle misaligned addresses transparently via byte-by-byte decomposition. Critical for Linux boot — the kernel may generate misaligned accesses during early init and string operations.
+- **UART 16550 THRE interrupt fix**: THRE (Transmit Holding Register Empty) interrupt now follows proper 16550 behavior — reading IIR clears the THRE condition, writing THR re-arms it, and enabling THRE in IER when THR is empty triggers the interrupt. Fixes console output stalls during Linux boot.
+- **SBI CPPC and FWFT extension stubs**: Collaborative Processor Performance Control (0x43505043) and Firmware Features (0x46574654) extensions now return `SBI_ERR_NOT_SUPPORTED` cleanly. Linux probes these during early boot.
+
+### Improvements
+- DTB ISA string updated to include `svinval` extension
+- DTB now includes `riscv,cbom-block-size` and `riscv,cboz-block-size` properties (64 bytes) — Linux cache management subsystem probes these
+- 8 new tests covering misaligned loads/stores, UART THRE behavior, and SBI extension stubs
+
+### Stats
+- 107 tests passing (up from 99)
+- Full RV64IMACSU with misaligned access support
+- SBI firmware: timer, IPI, HSM, RFENCE, SRST, DBCN (+ PMU/SUSP/NACL/STA/CPPC/FWFT stubs)
+
 ## v0.15.0 — Bus MMIO Refactor, HPM Counters, SBI Extension Stubs
 
 ### Major Features

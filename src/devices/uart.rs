@@ -20,6 +20,8 @@ pub struct Uart {
     fcr: u8,
     /// Scratch register
     scr: u8,
+    /// THRE interrupt pending (cleared on IIR read when THRE is shown)
+    thre_pending: bool,
 }
 
 // LSR bits
@@ -49,6 +51,7 @@ impl Uart {
             dlm: 0,
             fcr: 0,
             scr: 0,
+            thre_pending: true,
         }
     }
 
@@ -64,8 +67,8 @@ impl Uart {
         if self.ier & IER_RDA != 0 && self.lsr & LSR_DR != 0 {
             return true;
         }
-        // THRE interrupt: transmitter empty and IER_THRE enabled
-        if self.ier & IER_THRE != 0 && self.lsr & LSR_THRE != 0 {
+        // THRE interrupt: transmitter empty, IER_THRE enabled, and THRE condition active
+        if self.ier & IER_THRE != 0 && self.thre_pending {
             return true;
         }
         false
@@ -91,19 +94,7 @@ impl Uart {
                     self.ier as u64
                 }
             }
-            2 => {
-                // IIR — Interrupt Identification Register
-                // Bits 7:6 = FIFO status (0xC0 when FIFOs enabled)
-                let fifo_bits: u8 = if self.fcr & 1 != 0 { 0xC0 } else { 0 };
-                // Priority: RLS > RDA > THRE > Modem
-                if self.lsr & LSR_DR != 0 && self.ier & IER_RDA != 0 {
-                    (fifo_bits | 0x04) as u64 // RDA interrupt pending
-                } else if self.lsr & LSR_THRE != 0 && self.ier & IER_THRE != 0 {
-                    (fifo_bits | 0x02) as u64 // THRE interrupt pending
-                } else {
-                    (fifo_bits | 0x01) as u64 // No interrupt pending
-                }
-            }
+            2 => self.read_iir(),
             3 => self.lcr as u64,
             4 => self.mcr as u64,
             5 => self.lsr as u64,
@@ -114,6 +105,19 @@ impl Uart {
             }
             7 => self.scr as u64,
             _ => 0,
+        }
+    }
+
+    /// Read IIR (non-mutable version for immutable read path)
+    fn read_iir(&self) -> u64 {
+        let fifo_bits: u8 = if self.fcr & 1 != 0 { 0xC0 } else { 0 };
+        // Priority: RLS > RDA > THRE > Modem
+        if self.lsr & LSR_DR != 0 && self.ier & IER_RDA != 0 {
+            (fifo_bits | 0x04) as u64 // RDA interrupt pending
+        } else if self.thre_pending && self.ier & IER_THRE != 0 {
+            (fifo_bits | 0x02) as u64 // THRE interrupt pending
+        } else {
+            (fifo_bits | 0x01) as u64 // No interrupt pending
         }
     }
 
@@ -132,6 +136,15 @@ impl Uart {
                     0
                 }
             }
+            2 => {
+                // IIR read — reading IIR clears THRE pending (per 16550 spec)
+                let val = self.read_iir();
+                if val & 0x0F == 0x02 {
+                    // THRE was the reported interrupt; reading IIR clears it
+                    self.thre_pending = false;
+                }
+                val
+            }
             _ => self.read(offset),
         }
     }
@@ -148,13 +161,21 @@ impl Uart {
                     let mut stdout = io::stdout().lock();
                     let _ = stdout.write_all(&[val]);
                     let _ = stdout.flush();
+                    // Writing THR re-arms THRE interrupt (transmitter is immediately "empty" again
+                    // since we flush instantly)
+                    self.thre_pending = true;
                 }
             }
             1 => {
                 if dlab == 1 {
                     self.dlm = val;
                 } else {
+                    let old_ier = self.ier;
                     self.ier = val;
+                    // Enabling THRE interrupt when THR is empty triggers THRE
+                    if val & IER_THRE != 0 && old_ier & IER_THRE == 0 && self.lsr & LSR_THRE != 0 {
+                        self.thre_pending = true;
+                    }
                 }
             }
             2 => self.fcr = val,

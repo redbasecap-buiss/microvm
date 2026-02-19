@@ -87,17 +87,72 @@ fn op_load(cpu: &mut Cpu, bus: &mut Bus, inst: &Instruction, len: u64) {
         }
     };
     let val = match inst.funct3 {
-        0 => bus.read8(phys) as i8 as i64 as u64,   // LB
-        1 => bus.read16(phys) as i16 as i64 as u64, // LH
-        2 => bus.read32(phys) as i32 as i64 as u64, // LW
-        3 => bus.read64(phys),                      // LD
-        4 => bus.read8(phys) as u64,                // LBU
-        5 => bus.read16(phys) as u64,               // LHU
-        6 => bus.read32(phys) as u64,               // LWU
+        0 => bus.read8(phys) as i8 as i64 as u64, // LB
+        1 => {
+            // LH — support misaligned access
+            if phys & 1 != 0 {
+                let lo = bus.read8(phys) as u16;
+                let hi = bus.read8(phys.wrapping_add(1)) as u16;
+                (lo | (hi << 8)) as i16 as i64 as u64
+            } else {
+                bus.read16(phys) as i16 as i64 as u64
+            }
+        }
+        2 => {
+            // LW — support misaligned access
+            if phys & 3 != 0 {
+                read_misaligned_u32(bus, phys) as i32 as i64 as u64
+            } else {
+                bus.read32(phys) as i32 as i64 as u64
+            }
+        }
+        3 => {
+            // LD — support misaligned access
+            if phys & 7 != 0 {
+                read_misaligned_u64(bus, phys)
+            } else {
+                bus.read64(phys)
+            }
+        }
+        4 => bus.read8(phys) as u64, // LBU
+        5 => {
+            // LHU — support misaligned access
+            if phys & 1 != 0 {
+                let lo = bus.read8(phys) as u16;
+                let hi = bus.read8(phys.wrapping_add(1)) as u16;
+                (lo | (hi << 8)) as u64
+            } else {
+                bus.read16(phys) as u64
+            }
+        }
+        6 => {
+            // LWU — support misaligned access
+            if phys & 3 != 0 {
+                read_misaligned_u32(bus, phys) as u64
+            } else {
+                bus.read32(phys) as u64
+            }
+        }
         _ => 0,
     };
     cpu.regs[inst.rd] = val;
     cpu.pc += len;
+}
+
+/// Read a 32-bit value from a potentially misaligned address byte-by-byte
+fn read_misaligned_u32(bus: &mut Bus, addr: u64) -> u32 {
+    let b0 = bus.read8(addr) as u32;
+    let b1 = bus.read8(addr.wrapping_add(1)) as u32;
+    let b2 = bus.read8(addr.wrapping_add(2)) as u32;
+    let b3 = bus.read8(addr.wrapping_add(3)) as u32;
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+}
+
+/// Read a 64-bit value from a potentially misaligned address byte-by-byte
+fn read_misaligned_u64(bus: &mut Bus, addr: u64) -> u64 {
+    let lo = read_misaligned_u32(bus, addr) as u64;
+    let hi = read_misaligned_u32(bus, addr.wrapping_add(4)) as u64;
+    lo | (hi << 32)
 }
 
 fn op_store(cpu: &mut Cpu, bus: &mut Bus, inst: &Instruction, len: u64) {
@@ -115,12 +170,48 @@ fn op_store(cpu: &mut Cpu, bus: &mut Bus, inst: &Instruction, len: u64) {
     let val = cpu.regs[inst.rs2];
     match inst.funct3 {
         0 => bus.write8(phys, val as u8),
-        1 => bus.write16(phys, val as u16),
-        2 => bus.write32(phys, val as u32),
-        3 => bus.write64(phys, val),
+        1 => {
+            // SH — support misaligned access
+            if phys & 1 != 0 {
+                bus.write8(phys, val as u8);
+                bus.write8(phys.wrapping_add(1), (val >> 8) as u8);
+            } else {
+                bus.write16(phys, val as u16);
+            }
+        }
+        2 => {
+            // SW — support misaligned access
+            if phys & 3 != 0 {
+                write_misaligned_u32(bus, phys, val as u32);
+            } else {
+                bus.write32(phys, val as u32);
+            }
+        }
+        3 => {
+            // SD — support misaligned access
+            if phys & 7 != 0 {
+                write_misaligned_u64(bus, phys, val);
+            } else {
+                bus.write64(phys, val);
+            }
+        }
         _ => {}
     }
     cpu.pc += len;
+}
+
+/// Write a 32-bit value to a potentially misaligned address byte-by-byte
+fn write_misaligned_u32(bus: &mut Bus, addr: u64, val: u32) {
+    bus.write8(addr, val as u8);
+    bus.write8(addr.wrapping_add(1), (val >> 8) as u8);
+    bus.write8(addr.wrapping_add(2), (val >> 16) as u8);
+    bus.write8(addr.wrapping_add(3), (val >> 24) as u8);
+}
+
+/// Write a 64-bit value to a potentially misaligned address byte-by-byte
+fn write_misaligned_u64(bus: &mut Bus, addr: u64, val: u64) {
+    write_misaligned_u32(bus, addr, val as u32);
+    write_misaligned_u32(bus, addr.wrapping_add(4), (val >> 32) as u32);
 }
 
 fn op_imm(cpu: &mut Cpu, inst: &Instruction, len: u64) {
@@ -840,6 +931,18 @@ fn handle_sbi_call(cpu: &mut Cpu, bus: &mut Bus) -> bool {
         }
         0x535441 => {
             // STA (Steal-time Accounting) extension
+            cpu.regs[10] = (-2i64) as u64;
+            cpu.regs[11] = 0;
+            true
+        }
+        0x43505043 => {
+            // CPPC (Collaborative Processor Performance Control) extension
+            cpu.regs[10] = (-2i64) as u64;
+            cpu.regs[11] = 0;
+            true
+        }
+        0x46574654 => {
+            // FWFT (Firmware Features) extension
             cpu.regs[10] = (-2i64) as u64;
             cpu.regs[11] = 0;
             true
