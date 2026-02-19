@@ -170,6 +170,11 @@ impl Vm {
                 self.bus.plic.set_pending(9); // VirtIO console IRQ = 9
             }
 
+            // Update VirtIO RNG interrupt
+            if self.bus.virtio_rng.has_interrupt() {
+                self.bus.plic.set_pending(11); // VirtIO RNG IRQ = 11
+            }
+
             // External interrupts via PLIC → SEIP
             if self.bus.plic.has_interrupt(1) {
                 let mip = self.cpu.csrs.read(csr::MIP);
@@ -214,6 +219,13 @@ impl Vm {
                     let dram_base = DRAM_BASE;
                     let ram = self.bus.ram.as_mut_slice();
                     self.bus.virtio_console.process_queues(ram, dram_base);
+                }
+
+                // Process VirtIO RNG queue
+                if self.bus.virtio_rng.needs_processing() {
+                    let dram_base = DRAM_BASE;
+                    let ram = self.bus.ram.as_mut_slice();
+                    self.bus.virtio_rng.process_queue(ram, dram_base);
                 }
             }
         }

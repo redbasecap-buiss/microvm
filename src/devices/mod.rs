@@ -4,3 +4,4 @@ pub mod uart;
 pub mod virtio_blk;
 pub mod virtio_console;
 pub mod virtio_net;
+pub mod virtio_rng;

@@ -357,6 +357,22 @@ pub fn generate_dtb(
     b.prop_u32("interrupt-parent", 2);
     b.end_node();
 
+    // VirtIO MMIO RNG Device (provides entropy to guest)
+    b.begin_node(&format!("virtio_mmio@{:x}", memory::VIRTIO2_BASE));
+    b.prop_str("compatible", "virtio,mmio");
+    b.prop_u32_array(
+        "reg",
+        &[
+            (memory::VIRTIO2_BASE >> 32) as u32,
+            memory::VIRTIO2_BASE as u32,
+            0,
+            memory::VIRTIO2_SIZE as u32,
+        ],
+    );
+    b.prop_u32_array("interrupts", &[11]);
+    b.prop_u32("interrupt-parent", 2);
+    b.end_node();
+
     b.end_node(); // soc
     b.end_node(); // root
 

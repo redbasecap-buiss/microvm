@@ -3,6 +3,7 @@ pub mod rom;
 
 use crate::devices::{
     clint::Clint, plic::Plic, uart::Uart, virtio_blk::VirtioBlk, virtio_console::VirtioConsole,
+    virtio_rng::VirtioRng,
 };
 
 // Memory map
@@ -12,6 +13,8 @@ pub const VIRTIO0_BASE: u64 = 0x1000_1000; // VirtIO block
 pub const VIRTIO0_SIZE: u64 = 0x1000;
 pub const VIRTIO1_BASE: u64 = 0x1000_2000; // VirtIO console
 pub const VIRTIO1_SIZE: u64 = 0x1000;
+pub const VIRTIO2_BASE: u64 = 0x1000_3000; // VirtIO RNG
+pub const VIRTIO2_SIZE: u64 = 0x1000;
 pub const CLINT_BASE: u64 = 0x0200_0000;
 pub const CLINT_SIZE: u64 = 0x10000;
 pub const PLIC_BASE: u64 = 0x0C00_0000;
@@ -26,6 +29,7 @@ pub struct Bus {
     pub plic: Plic,
     pub virtio_blk: VirtioBlk,
     pub virtio_console: VirtioConsole,
+    pub virtio_rng: VirtioRng,
 }
 
 impl Bus {
@@ -37,12 +41,14 @@ impl Bus {
             plic: Plic::new(),
             virtio_blk: VirtioBlk::new(),
             virtio_console: VirtioConsole::new(),
+            virtio_rng: VirtioRng::new(),
         }
     }
 
     /// Route a physical address to the correct MMIO device or RAM.
     /// Returns (device_id, offset) where device_id:
-    ///   0=RAM, 1=UART, 2=VirtIO blk, 3=CLINT, 4=PLIC, 5=VirtIO console, 0xFF=unmapped
+    ///   0=RAM, 1=UART, 2=VirtIO blk, 3=CLINT, 4=PLIC,
+    ///   5=VirtIO console, 6=VirtIO RNG, 0xFF=unmapped
     #[inline(always)]
     fn route(&self, addr: u64) -> (u8, u64) {
         if addr >= DRAM_BASE {
@@ -59,6 +65,9 @@ impl Bus {
         }
         if (VIRTIO1_BASE..VIRTIO1_BASE + VIRTIO1_SIZE).contains(&addr) {
             return (5, addr - VIRTIO1_BASE);
+        }
+        if (VIRTIO2_BASE..VIRTIO2_BASE + VIRTIO2_SIZE).contains(&addr) {
+            return (6, addr - VIRTIO2_BASE);
         }
         if (CLINT_BASE..CLINT_BASE + CLINT_SIZE).contains(&addr) {
             return (3, addr - CLINT_BASE);
@@ -77,6 +86,7 @@ impl Bus {
             (3, off) => self.clint.read(off) as u8,
             (4, off) => self.plic.read(off) as u8,
             (5, off) => self.virtio_console.read(off) as u8,
+            (6, off) => self.virtio_rng.read(off) as u8,
             _ => 0,
         }
     }
@@ -104,6 +114,7 @@ impl Bus {
             (3, off) => self.clint.read(off) as u32,
             (4, off) => self.plic.read(off) as u32,
             (5, off) => self.virtio_console.read(off) as u32,
+            (6, off) => self.virtio_rng.read(off),
             _ => 0,
         }
     }
@@ -128,6 +139,7 @@ impl Bus {
             (3, off) => self.clint.write(off, val as u64),
             (4, off) => self.plic.write(off, val as u64),
             (5, off) => self.virtio_console.write(off, val as u64),
+            (6, off) => self.virtio_rng.write(off, val as u64),
             _ => {}
         }
     }
@@ -153,6 +165,7 @@ impl Bus {
             (3, off) => self.clint.write(off, val as u64),
             (4, off) => self.plic.write(off, val as u64),
             (5, off) => self.virtio_console.write(off, val as u64),
+            (6, off) => self.virtio_rng.write(off, val as u64),
             _ => {}
         }
     }
