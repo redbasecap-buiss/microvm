@@ -221,15 +221,36 @@ microvm run --example minimal-kernel
 - [x] Standalone starter kit repo
 
 ### v0.3.0 — Linux Boot
-- [ ] VirtIO Block/Console/Network
+- [x] VirtIO Block/Console/Network/RNG
 - [ ] F/D extensions (floating point)
 - [ ] Boot actual Linux kernel
 
 ### v0.4.0 — Developer Experience
 - [ ] Built-in kernel builder
-- [ ] GDB server
-- [ ] Instruction tracing
+- [x] GDB server (`--gdb <port>`)
+- [x] Instruction tracing (`--trace`)
 - [ ] Snapshot/restore
+
+---
+
+## 🔍 GDB Debugging
+
+Debug your kernel with GDB — set breakpoints, inspect registers, step through instructions:
+
+```bash
+# Terminal 1: Start emulator with GDB server
+microvm run --kernel my-kernel.bin --gdb 1234
+
+# Terminal 2: Connect GDB
+riscv64-unknown-elf-gdb -ex 'target remote :1234'
+(gdb) break *0x80200000
+(gdb) continue
+(gdb) info registers
+(gdb) x/10i $pc
+(gdb) stepi
+```
+
+Supports: register read/write, memory inspection, software breakpoints, single-step, continue, Ctrl-C halt, and RISC-V target description XML.
 
 ---
 

@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.26.0 — GDB Remote Debug Server
+
+### Major Features
+- **GDB remote serial protocol (RSP) stub**: Full-featured GDB server accessible via `--gdb <port>`. Connect with `riscv64-unknown-elf-gdb -ex 'target remote :<port>'` or any GDB-compatible debugger.
+- **Register inspection**: Read/write all 32 general-purpose registers + PC via `g/G/p/P` packets. Little-endian hex encoding per GDB RSP spec.
+- **Memory read/write**: Arbitrary memory access via `m/M` packets — inspect RAM, MMIO registers, device tree in-place.
+- **Execution control**: Continue (`c`), single-step (`s`), `vCont` support. CPU halts on connect, waiting for GDB commands.
+- **Software breakpoints**: Insert/remove breakpoints via `Z0/z0` packets. Breakpoints checked after each instruction.
+- **Target description XML**: `qXfer:features:read` returns RISC-V 64-bit register layout so GDB auto-detects architecture.
+- **Monitor commands**: `qRcmd` support for custom emulator commands.
+- **Ctrl-C interrupt**: Send SIGINT (0x03) to halt a running emulation.
+
+### Usage
+```bash
+# Start emulator with GDB server on port 1234
+microvm run --kernel my-kernel.bin --gdb 1234
+
+# In another terminal:
+riscv64-unknown-elf-gdb -ex 'target remote :1234'
+(gdb) break *0x80200000
+(gdb) continue
+(gdb) info registers
+(gdb) x/10i $pc
+```
+
+### Stats
+- 5 new GDB unit tests (hex encoding, register format, breakpoint management, address parsing)
+- 144 tests passing (139 → 144)
+- New module: `src/gdb.rs` (~530 lines)
+
 ## v0.24.0 — VirtIO Network Device
 
 ### Major Features

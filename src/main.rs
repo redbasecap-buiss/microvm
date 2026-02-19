@@ -4,6 +4,7 @@ use std::path::PathBuf;
 mod cpu;
 mod devices;
 mod dtb;
+mod gdb;
 mod loader;
 mod memory;
 mod vm;
@@ -58,6 +59,10 @@ enum Commands {
         /// Stop after N instructions (useful with --trace)
         #[arg(long)]
         max_insns: Option<u64>,
+
+        /// Start GDB server on given port (e.g. --gdb 1234)
+        #[arg(long)]
+        gdb: Option<u16>,
     },
 }
 
@@ -76,6 +81,7 @@ fn main() {
             load_addr,
             trace,
             max_insns,
+            gdb: gdb_port,
         } => {
             let addr = u64::from_str_radix(load_addr.trim_start_matches("0x"), 16)
                 .expect("Invalid load address");
@@ -89,6 +95,7 @@ fn main() {
                 load_addr: addr,
                 trace,
                 max_insns,
+                gdb_port,
             };
 
             let mut vm = vm::Vm::new(config);

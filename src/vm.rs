@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use crate::cpu::csr;
 use crate::cpu::Cpu;
 use crate::dtb;
+use crate::gdb::{GdbAction, GdbServer};
 use crate::loader;
 use crate::memory::rom::BootRom;
 use crate::memory::{Bus, DRAM_BASE};
@@ -16,6 +17,7 @@ pub struct VmConfig {
     pub load_addr: u64,
     pub trace: bool,
     pub max_insns: Option<u64>,
+    pub gdb_port: Option<u16>,
 }
 
 pub struct Vm {
@@ -120,6 +122,34 @@ impl Vm {
         let trace = self.config.trace;
         let max_insns = self.config.max_insns;
 
+        // Set up GDB server if requested
+        let mut gdb: Option<GdbServer> = if let Some(port) = self.config.gdb_port {
+            match GdbServer::new(port) {
+                Ok(mut server) => {
+                    if let Err(e) = server.wait_for_client() {
+                        eprintln!("GDB client connection failed: {}", e);
+                        None
+                    } else {
+                        // Initial halt — wait for GDB commands before running
+                        match server.report_stop(&mut self.cpu, &mut self.bus, 5) {
+                            GdbAction::Continue | GdbAction::Step => {}
+                            GdbAction::Disconnect => {
+                                log::info!("GDB disconnected before start");
+                                return;
+                            }
+                        }
+                        Some(server)
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to start GDB server: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         log::info!("Starting emulation...");
 
         // Main execution loop
@@ -203,10 +233,27 @@ impl Vm {
             }
 
             if !self.cpu.step(&mut self.bus) {
+                // Report termination to GDB if connected
+                if let Some(ref mut gdb_server) = gdb {
+                    gdb_server.report_stop(&mut self.cpu, &mut self.bus, 5);
+                }
                 break;
             }
 
             insn_count += 1;
+
+            // GDB: check for breakpoints and single-step
+            if let Some(ref mut gdb_server) = gdb {
+                if gdb_server.should_halt(self.cpu.pc) {
+                    match gdb_server.report_stop(&mut self.cpu, &mut self.bus, 5) {
+                        GdbAction::Continue | GdbAction::Step => {}
+                        GdbAction::Disconnect => {
+                            log::info!("GDB disconnected");
+                            gdb = None;
+                        }
+                    }
+                }
+            }
 
             // Periodic tasks (every 1024 instructions)
             if insn_count & 0x3FF == 0 {
