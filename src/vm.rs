@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use crate::cpu::csr;
 use crate::cpu::Cpu;
 use crate::dtb;
+use crate::loader;
 use crate::memory::rom::BootRom;
 use crate::memory::{Bus, DRAM_BASE};
 
@@ -34,20 +35,27 @@ impl Vm {
     pub fn run(&mut self) {
         let ram_bytes = self.config.ram_size_mib * 1024 * 1024;
 
-        // Load kernel
+        // Load kernel (auto-detects ELF, RISC-V Image, or raw binary)
         let kernel_data = std::fs::read(&self.config.kernel_path).unwrap_or_else(|e| {
             eprintln!("Failed to read kernel: {}", e);
             std::process::exit(1);
         });
 
-        let kernel_offset = self.config.load_addr - DRAM_BASE;
-        self.bus.load_binary(&kernel_data, kernel_offset);
+        let loaded = loader::load_kernel(
+            &kernel_data,
+            self.config.load_addr,
+            self.bus.ram.as_mut_slice(),
+            DRAM_BASE,
+        );
+        let kernel_entry = loaded.entry;
 
         log::info!(
-            "Loaded kernel: {} ({} bytes) at {:#x}",
+            "Loaded kernel: {} ({} bytes) entry={:#x} base={:#x} size={:#x}",
             self.config.kernel_path.display(),
             kernel_data.len(),
-            self.config.load_addr
+            loaded.entry,
+            loaded.load_base,
+            loaded.load_size
         );
 
         // Attach disk image if provided
@@ -100,7 +108,7 @@ impl Vm {
         log::info!("DTB at {:#x} ({} bytes)", dtb_addr, dtb_data.len());
 
         // Generate boot ROM and load at DRAM_BASE
-        let boot_code = BootRom::generate(self.config.load_addr, dtb_addr);
+        let boot_code = BootRom::generate(kernel_entry, dtb_addr);
         self.bus.load_binary(&boot_code, 0);
 
         // Reset CPU — start at DRAM_BASE (boot ROM)

@@ -4,6 +4,7 @@ use std::path::PathBuf;
 mod cpu;
 mod devices;
 mod dtb;
+mod loader;
 mod memory;
 mod vm;
 
