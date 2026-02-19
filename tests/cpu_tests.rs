@@ -18,6 +18,24 @@ fn run_program(instructions: &[u32], steps: usize) -> (Cpu, Bus) {
     (cpu, bus)
 }
 
+/// Helper: create a CPU+Bus with pre-set registers, load instructions, run N steps
+fn run_program_with_regs(instructions: &[u32], steps: usize, regs: &[(usize, u64)]) -> (Cpu, Bus) {
+    let mut bus = Bus::new(64 * 1024);
+    let bytes: Vec<u8> = instructions.iter().flat_map(|i| i.to_le_bytes()).collect();
+    bus.load_binary(&bytes, 0);
+    let mut cpu = Cpu::new();
+    cpu.reset(DRAM_BASE);
+    for &(reg, val) in regs {
+        cpu.regs[reg] = val;
+    }
+    for _ in 0..steps {
+        if !cpu.step(&mut bus) {
+            break;
+        }
+    }
+    (cpu, bus)
+}
+
 /// Helper: build DRAM_BASE address in register using LUI+ADDI (handles sign extension)
 /// DRAM_BASE = 0x80000000. LUI 0x80000 → sign-extends to 0xFFFFFFFF80000000 on RV64.
 /// We need: lui rd, 0x80001; addi rd, rd, -4096 to get 0x80000000... nah.
@@ -1956,4 +1974,167 @@ fn test_sbi_fwft_returns_not_supported() {
         cpu.regs[10] as i64, -2,
         "FWFT should return SBI_ERR_NOT_SUPPORTED"
     );
+}
+
+// ============== Zba Extension (Address Generation) ==============
+
+#[test]
+fn test_zba_sh1add() {
+    // SH1ADD x3, x1, x2: x3 = x1 + (x2 << 1)
+    // Encoding: funct7=0x10, rs2, rs1, funct3=2, rd, OP(0x33)
+    let inst = (0x10 << 25) | (2 << 20) | (1 << 15) | (2 << 12) | (3 << 7) | 0x33;
+    let (cpu, _) = run_program_with_regs(&[inst], 1, &[(1, 100), (2, 50)]);
+    assert_eq!(cpu.regs[3], 200, "SH1ADD: 100 + (50 << 1) = 200");
+}
+
+#[test]
+fn test_zba_sh2add() {
+    // SH2ADD x3, x1, x2: x3 = x1 + (x2 << 2)
+    let inst = (0x10 << 25) | (2 << 20) | (1 << 15) | (4 << 12) | (3 << 7) | 0x33;
+    let (cpu, _) = run_program_with_regs(&[inst], 1, &[(1, 100), (2, 50)]);
+    assert_eq!(cpu.regs[3], 300, "SH2ADD: 100 + (50 << 2) = 300");
+}
+
+#[test]
+fn test_zba_sh3add() {
+    // SH3ADD x3, x1, x2: x3 = x1 + (x2 << 3)
+    let inst = (0x10 << 25) | (2 << 20) | (1 << 15) | (6 << 12) | (3 << 7) | 0x33;
+    let (cpu, _) = run_program_with_regs(&[inst], 1, &[(1, 100), (2, 50)]);
+    assert_eq!(cpu.regs[3], 500, "SH3ADD: 100 + (50 << 3) = 500");
+}
+
+// ============== Zbb Extension (Basic Bit Manipulation) ==============
+
+#[test]
+fn test_zbb_clz() {
+    // CLZ x2, x1: count leading zeros
+    // Encoding: funct7=0x30, rs2=0x00, rs1, funct3=1, rd, OP-IMM(0x13)
+    let inst = (0x600 << 20) | (1 << 15) | (1 << 12) | (2 << 7) | 0x13;
+    let (cpu, _) = run_program_with_regs(&[inst], 1, &[(1, 0x00FF_0000_0000_0000)]);
+    assert_eq!(cpu.regs[2], 8, "CLZ of 0x00FF... should be 8");
+}
+
+#[test]
+fn test_zbb_ctz() {
+    // CTZ x2, x1: count trailing zeros
+    let inst = (0x601 << 20) | (1 << 15) | (1 << 12) | (2 << 7) | 0x13;
+    let (cpu, _) = run_program_with_regs(&[inst], 1, &[(1, 0x100)]);
+    assert_eq!(cpu.regs[2], 8, "CTZ of 0x100 should be 8");
+}
+
+#[test]
+fn test_zbb_cpop() {
+    // CPOP x2, x1: count set bits
+    let inst = (0x602 << 20) | (1 << 15) | (1 << 12) | (2 << 7) | 0x13;
+    let (cpu, _) = run_program_with_regs(&[inst], 1, &[(1, 0xFF00FF)]);
+    assert_eq!(cpu.regs[2], 16, "CPOP of 0xFF00FF should be 16");
+}
+
+#[test]
+fn test_zbb_sext_b() {
+    // SEXT.B x2, x1: sign-extend byte
+    let inst = (0x604 << 20) | (1 << 15) | (1 << 12) | (2 << 7) | 0x13;
+    let (cpu, _) = run_program_with_regs(&[inst], 1, &[(1, 0x80)]);
+    assert_eq!(cpu.regs[2] as i64, -128, "SEXT.B of 0x80 should be -128");
+}
+
+#[test]
+fn test_zbb_sext_h() {
+    // SEXT.H x2, x1: sign-extend halfword
+    let inst = (0x605 << 20) | (1 << 15) | (1 << 12) | (2 << 7) | 0x13;
+    let (cpu, _) = run_program_with_regs(&[inst], 1, &[(1, 0x8000)]);
+    assert_eq!(
+        cpu.regs[2] as i64, -32768,
+        "SEXT.H of 0x8000 should be -32768"
+    );
+}
+
+#[test]
+fn test_zbb_andn() {
+    // ANDN x3, x1, x2: x3 = x1 & ~x2
+    let inst = (0x20 << 25) | (2 << 20) | (1 << 15) | (7 << 12) | (3 << 7) | 0x33;
+    let (cpu, _) = run_program_with_regs(&[inst], 1, &[(1, 0xFF), (2, 0x0F)]);
+    assert_eq!(cpu.regs[3], 0xF0, "ANDN: 0xFF & ~0x0F = 0xF0");
+}
+
+#[test]
+fn test_zbb_orn() {
+    // ORN x3, x1, x2: x3 = x1 | ~x2
+    let inst = (0x20 << 25) | (2 << 20) | (1 << 15) | (6 << 12) | (3 << 7) | 0x33;
+    let (cpu, _) = run_program_with_regs(&[inst], 1, &[(1, 0), (2, 0xFF)]);
+    assert_eq!(cpu.regs[3], !0xFFu64, "ORN: 0 | ~0xFF");
+}
+
+#[test]
+fn test_zbb_xnor() {
+    // XNOR x3, x1, x2: x3 = ~(x1 ^ x2)
+    let inst = (0x20 << 25) | (2 << 20) | (1 << 15) | (4 << 12) | (3 << 7) | 0x33;
+    let (cpu, _) = run_program_with_regs(&[inst], 1, &[(1, 0xFF), (2, 0xFF)]);
+    assert_eq!(cpu.regs[3], !0u64, "XNOR: ~(0xFF ^ 0xFF) = all ones");
+}
+
+#[test]
+fn test_zbb_min_max() {
+    // MIN x3, x1, x2 (signed)
+    let min_inst = (0x05 << 25) | (2 << 20) | (1 << 15) | (4 << 12) | (3 << 7) | 0x33;
+    let (cpu, _) = run_program_with_regs(&[min_inst], 1, &[(1, (-5i64) as u64), (2, 10)]);
+    assert_eq!(cpu.regs[3] as i64, -5, "MIN(-5, 10) = -5");
+
+    // MAX x3, x1, x2 (signed)
+    let max_inst = (0x05 << 25) | (2 << 20) | (1 << 15) | (6 << 12) | (3 << 7) | 0x33;
+    let (cpu, _) = run_program_with_regs(&[max_inst], 1, &[(1, (-5i64) as u64), (2, 10)]);
+    assert_eq!(cpu.regs[3] as i64, 10, "MAX(-5, 10) = 10");
+
+    // MINU x3, x1, x2 (unsigned)
+    let minu_inst = (0x05 << 25) | (2 << 20) | (1 << 15) | (5 << 12) | (3 << 7) | 0x33;
+    let (cpu, _) = run_program_with_regs(&[minu_inst], 1, &[(1, 5), (2, 10)]);
+    assert_eq!(cpu.regs[3], 5, "MINU(5, 10) = 5");
+
+    // MAXU x3, x1, x2 (unsigned)
+    let maxu_inst = (0x05 << 25) | (2 << 20) | (1 << 15) | (7 << 12) | (3 << 7) | 0x33;
+    let (cpu, _) = run_program_with_regs(&[maxu_inst], 1, &[(1, 5), (2, 10)]);
+    assert_eq!(cpu.regs[3], 10, "MAXU(5, 10) = 10");
+}
+
+#[test]
+fn test_zbb_rol_ror() {
+    // ROL x3, x1, x2: rotate left
+    let rol_inst = (0x30 << 25) | (2 << 20) | (1 << 15) | (1 << 12) | (3 << 7) | 0x33;
+    let (cpu, _) = run_program_with_regs(&[rol_inst], 1, &[(1, 0x8000_0000_0000_0001), (2, 4)]);
+    assert_eq!(cpu.regs[3], 0x0000_0000_0000_0018, "ROL by 4");
+
+    // ROR x3, x1, x2: rotate right
+    let ror_inst = (0x30 << 25) | (2 << 20) | (1 << 15) | (5 << 12) | (3 << 7) | 0x33;
+    let (cpu, _) = run_program_with_regs(&[ror_inst], 1, &[(1, 0x0000_0000_0000_0018), (2, 4)]);
+    assert_eq!(cpu.regs[3], 0x8000_0000_0000_0001, "ROR by 4");
+}
+
+#[test]
+fn test_zbb_rev8() {
+    // REV8 x2, x1: byte-reverse
+    // Encoding: funct12=0x6B8, rs1, funct3=5, rd, OP-IMM(0x13)
+    let inst = (0x6B8 << 20) | (1 << 15) | (5 << 12) | (2 << 7) | 0x13;
+    let (cpu, _) = run_program_with_regs(&[inst], 1, &[(1, 0x0102030405060708)]);
+    assert_eq!(cpu.regs[2], 0x0807060504030201, "REV8 byte reversal");
+}
+
+#[test]
+fn test_zbb_orc_b() {
+    // ORC.B x2, x1: bitwise OR-combine bytes
+    // Encoding: funct12=0x287, rs1, funct3=5, rd, OP-IMM(0x13)
+    let inst = (0x287 << 20) | (1 << 15) | (5 << 12) | (2 << 7) | 0x13;
+    let (cpu, _) = run_program_with_regs(&[inst], 1, &[(1, 0x0001_0000_0100_0000)]);
+    assert_eq!(
+        cpu.regs[2], 0x00FF_0000_FF00_0000,
+        "ORC.B: non-zero bytes become 0xFF"
+    );
+}
+
+#[test]
+fn test_zbb_rori() {
+    // RORI x2, x1, 4: rotate right immediate
+    // Encoding: funct7=0x30, shamt=4, rs1, funct3=5, rd, OP-IMM(0x13)
+    let inst = (0x30 << 25) | (4 << 20) | (1 << 15) | (5 << 12) | (2 << 7) | 0x13;
+    let (cpu, _) = run_program_with_regs(&[inst], 1, &[(1, 0x0000_0000_0000_0018)]);
+    assert_eq!(cpu.regs[2], 0x8000_0000_0000_0001, "RORI by 4");
 }

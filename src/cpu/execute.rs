@@ -218,17 +218,48 @@ fn op_imm(cpu: &mut Cpu, inst: &Instruction, len: u64) {
     let rs1 = cpu.regs[inst.rs1];
     let imm = inst.imm_i as u64;
     let shamt = (imm & 0x3F) as u32;
+    let funct7 = inst.funct7;
     let val = match inst.funct3 {
-        0 => rs1.wrapping_add(imm),                // ADDI
-        1 => rs1 << shamt,                         // SLLI
+        0 => rs1.wrapping_add(imm), // ADDI
+        1 => {
+            // SLLI and Zbb count instructions
+            match (funct7, inst.rs2) {
+                (0x30, 0x00) => rs1.leading_zeros() as u64,        // CLZ
+                (0x30, 0x01) => rs1.trailing_zeros() as u64,       // CTZ
+                (0x30, 0x02) => rs1.count_ones() as u64,           // CPOP
+                (0x30, 0x04) => (rs1 as u8 as i8) as i64 as u64,   // SEXT.B
+                (0x30, 0x05) => (rs1 as u16 as i16) as i64 as u64, // SEXT.H
+                _ => rs1 << shamt,                                 // SLLI
+            }
+        }
         2 => ((rs1 as i64) < (imm as i64)) as u64, // SLTI
         3 => (rs1 < imm) as u64,                   // SLTIU
         4 => rs1 ^ imm,                            // XORI
         5 => {
-            if (inst.raw >> 30) & 1 == 1 {
-                ((rs1 as i64) >> shamt) as u64 // SRAI
-            } else {
-                rs1 >> shamt // SRLI
+            let top7 = (inst.raw >> 25) & 0x7F;
+            match top7 {
+                0x20 => ((rs1 as i64) >> shamt) as u64,    // SRAI
+                0x30 => rs1.rotate_right(shamt),           // RORI (Zbb)
+                0x34 if shamt == 0x18 => rs1.swap_bytes(), // REV8 (Zbb): funct12=0x6B8, shamt=0x18 doesn't match...
+                _ => {
+                    // Check for REV8 and ORC.B by full funct12
+                    let funct12 = (inst.raw >> 20) & 0xFFF;
+                    match funct12 {
+                        0x6B8 => rs1.swap_bytes(), // REV8 (Zbb, RV64)
+                        0x287 => {
+                            // ORC.B (Zbb)
+                            let mut result = 0u64;
+                            for i in 0..8 {
+                                let byte = (rs1 >> (i * 8)) & 0xFF;
+                                if byte != 0 {
+                                    result |= 0xFF << (i * 8);
+                                }
+                            }
+                            result
+                        }
+                        _ => rs1 >> shamt, // SRLI
+                    }
+                }
             }
         }
         6 => rs1 | imm, // ORI
@@ -243,14 +274,33 @@ fn op_imm32(cpu: &mut Cpu, inst: &Instruction, len: u64) {
     let rs1 = cpu.regs[inst.rs1] as u32;
     let imm = inst.imm_i as u32;
     let shamt = imm & 0x1F;
+    let funct7 = inst.funct7;
     let val = match inst.funct3 {
         0 => rs1.wrapping_add(imm) as i32 as i64 as u64, // ADDIW
-        1 => (rs1 << shamt) as i32 as i64 as u64,        // SLLIW
+        1 => {
+            match funct7 {
+                0x30 => {
+                    match inst.rs2 {
+                        0x00 => rs1.leading_zeros() as i32 as i64 as u64, // CLZW (Zbb)
+                        0x01 => rs1.trailing_zeros() as i32 as i64 as u64, // CTZW (Zbb)
+                        0x02 => rs1.count_ones() as i32 as i64 as u64,    // CPOPW (Zbb)
+                        _ => (rs1 << shamt) as i32 as i64 as u64,
+                    }
+                }
+                0x04 => {
+                    // SLLI.UW (Zba): shift rs1[31:0] left by shamt, zero-extend
+                    let rs1_full = cpu.regs[inst.rs1] as u32 as u64;
+                    rs1_full << shamt
+                }
+                _ => (rs1 << shamt) as i32 as i64 as u64, // SLLIW
+            }
+        }
         5 => {
-            if (inst.raw >> 30) & 1 == 1 {
-                ((rs1 as i32) >> shamt) as i64 as u64 // SRAIW
-            } else {
-                (rs1 >> shamt) as i32 as i64 as u64 // SRLIW
+            let top7 = (inst.raw >> 25) & 0x7F;
+            match top7 {
+                0x20 => ((rs1 as i32) >> shamt) as i64 as u64, // SRAIW
+                0x30 => rs1.rotate_right(shamt) as i32 as i64 as u64, // RORIW (Zbb)
+                _ => (rs1 >> shamt) as i32 as i64 as u64,      // SRLIW
             }
         }
         _ => 0,
@@ -316,6 +366,20 @@ fn op_reg(cpu: &mut Cpu, inst: &Instruction, len: u64) {
             (5, 0x20) => ((rs1 as i64) >> (rs2 & 0x3F)) as u64, // SRA
             (6, 0x00) => rs1 | rs2,                             // OR
             (7, 0x00) => rs1 & rs2,                             // AND
+            // Zba: address generation
+            (2, 0x10) => rs1.wrapping_add(rs2 << 1), // SH1ADD
+            (4, 0x10) => rs1.wrapping_add(rs2 << 2), // SH2ADD
+            (6, 0x10) => rs1.wrapping_add(rs2 << 3), // SH3ADD
+            // Zbb: basic bit manipulation
+            (7, 0x20) => rs1 & !rs2,   // ANDN
+            (6, 0x20) => rs1 | !rs2,   // ORN
+            (4, 0x20) => !(rs1 ^ rs2), // XNOR
+            (4, 0x05) => std::cmp::min(rs1 as i64, rs2 as i64) as u64, // MIN
+            (5, 0x05) => std::cmp::min(rs1, rs2), // MINU
+            (6, 0x05) => std::cmp::max(rs1 as i64, rs2 as i64) as u64, // MAX
+            (7, 0x05) => std::cmp::max(rs1, rs2), // MAXU
+            (1, 0x30) => rs1.rotate_left((rs2 & 0x3F) as u32), // ROL
+            (5, 0x30) => rs1.rotate_right((rs2 & 0x3F) as u32), // ROR
             _ => 0,
         }
     };
@@ -372,6 +436,25 @@ fn op_reg32(cpu: &mut Cpu, inst: &Instruction, len: u64) {
             (1, 0x00) => (rs1 << (rs2 & 0x1F)) as i32 as i64 as u64, // SLLW
             (5, 0x00) => (rs1 >> (rs2 & 0x1F)) as i32 as i64 as u64, // SRLW
             (5, 0x20) => ((rs1 as i32) >> (rs2 & 0x1F)) as i64 as u64, // SRAW
+            // Zba: address generation (W variants — zero-extend rs2 to 32 bits first)
+            (2, 0x10) => {
+                let r2_zext = cpu.regs[inst.rs2] as u32 as u64;
+                cpu.regs[inst.rs1].wrapping_add(r2_zext << 1) // SH1ADD.UW
+            }
+            (4, 0x10) => {
+                let r2_zext = cpu.regs[inst.rs2] as u32 as u64;
+                cpu.regs[inst.rs1].wrapping_add(r2_zext << 2) // SH2ADD.UW
+            }
+            (6, 0x10) => {
+                let r2_zext = cpu.regs[inst.rs2] as u32 as u64;
+                cpu.regs[inst.rs1].wrapping_add(r2_zext << 3) // SH3ADD.UW
+            }
+            (0, 0x04) => (cpu.regs[inst.rs2] as u32 as u64).wrapping_add(cpu.regs[inst.rs1]), // ADD.UW (Zba)
+            // Zbb: 32-bit rotate
+            (1, 0x30) => rs1.rotate_left(rs2 & 0x1F) as i32 as i64 as u64, // ROLW
+            (5, 0x30) => rs1.rotate_right(rs2 & 0x1F) as i32 as i64 as u64, // RORW
+            // Zbb: ZEXT.H (pack rd = rs1[15:0], zero-extended) encoded as funct7=0x04,funct3=4 in OP-32
+            (4, 0x04) => rs1 as u16 as u64, // ZEXT.H
             _ => 0,
         }
     };

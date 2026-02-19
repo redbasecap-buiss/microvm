@@ -219,7 +219,10 @@ pub fn generate_dtb(
     b.prop_str("device_type", "cpu");
     b.prop_u32("reg", 0);
     b.prop_str("compatible", "riscv");
-    b.prop_str("riscv,isa", "rv64imacsu_zicsr_zifencei_sstc_zicntr_svinval");
+    b.prop_str(
+        "riscv,isa",
+        "rv64imacsu_zicsr_zifencei_zba_zbb_sstc_zicntr_svinval",
+    );
     b.prop_str("riscv,isa-base", "rv64i");
     b.prop_str("mmu-type", "riscv,sv48");
     b.prop_str("status", "okay");
@@ -227,7 +230,7 @@ pub fn generate_dtb(
     b.prop_stringlist(
         "riscv,isa-extensions",
         &[
-            "i", "m", "a", "c", "zicsr", "zifencei", "sstc", "zicntr", "svinval",
+            "i", "m", "a", "c", "zicsr", "zifencei", "zba", "zbb", "sstc", "zicntr", "svinval",
         ],
     );
     // Cache block size for Zicbom (Linux probes this; 64 is standard)
