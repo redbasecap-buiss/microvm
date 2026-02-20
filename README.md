@@ -231,7 +231,7 @@ microvm run --example minimal-kernel
 - [ ] Built-in kernel builder
 - [x] GDB server (`--gdb <port>`)
 - [x] Instruction tracing (`--trace`)
-- [ ] Snapshot/restore
+- [x] Snapshot/restore (`--save-snapshot`, `--load-snapshot`)
 
 ---
 

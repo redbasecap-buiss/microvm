@@ -344,6 +344,18 @@ impl CsrFile {
         mode == PrivilegeMode::Machine
     }
 
+    /// Raw read — direct array access, bypassing SSTATUS/SIE/SIP masking.
+    /// Used for snapshot serialization.
+    pub fn read_raw(&self, addr: u16) -> u64 {
+        self.regs[addr as usize]
+    }
+
+    /// Raw write — direct array access, bypassing MISA/MSTATUS protection.
+    /// Used for snapshot deserialization.
+    pub fn write_raw(&mut self, addr: u16, val: u64) {
+        self.regs[addr as usize] = val;
+    }
+
     pub fn write(&mut self, addr: u16, val: u64) {
         match addr {
             MISA | MHARTID | MVENDORID | MARCHID | MIMPID => {} // Read-only

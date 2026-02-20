@@ -78,6 +78,10 @@ impl Ram {
         }
     }
 
+    pub fn as_slice(&self) -> &[u8] {
+        &self.data
+    }
+
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         &mut self.data
     }

@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.37.0 — Snapshot/Restore (Save & Load VM State)
+
+### Major Features
+- **Snapshot save/restore**: Complete VM state serialization to a binary file
+  - `--save-snapshot <path>`: Save VM state on exit (timeout, max-insns, or halt)
+  - `--load-snapshot <path>`: Restore VM state before running
+  - Preserves: CPU registers (x0-x31, f0-f31), PC, privilege mode, cycle counter, WFI flag, LR/SC reservation, all 4096 CSRs, PMP config, CLINT timer state, PLIC interrupt state, UART registers & rx buffer, full RAM contents
+  - RAM compression: page-level zero-page detection (most RAM pages are zero → 1 byte per page)
+  - Binary format `MVSN0001` with validation (magic check, RAM size mismatch detection)
+  - TLB automatically flushed on restore for correctness
+
+### New Tests
+- `test_snapshot_save_restore_cpu_state`: Save after running program, restore, verify registers
+- `test_snapshot_preserves_ram`: Write patterns to RAM, save/restore, verify data integrity
+- `test_snapshot_preserves_csrs`: Save/restore MTVEC, STVEC, MEPC, SEPC
+- `test_snapshot_invalid_magic`: Reject files with wrong magic bytes
+- `test_snapshot_ram_size_mismatch`: Reject snapshot with different RAM size
+- `test_snapshot_preserves_privilege_mode`: Verify mode, WFI, reservation survive round-trip
+- `test_compress_decompress_zeros`: Zero pages → 1 byte each
+- `test_compress_decompress_mixed`: Mixed zero/nonzero pages
+- `test_compress_decompress_all_nonzero`: Full data pages
+
+### Stats
+- 215 integration tests + 59+59 unit tests = 333 total, all passing
+
 ## v0.35.0 — Svadu Extension (Hardware A/D Bit Management)
 
 ### Major Features

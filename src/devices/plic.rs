@@ -111,6 +111,65 @@ impl Plic {
         }
     }
 
+    /// Save PLIC state for snapshot
+    pub fn save_state(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(64 * 4 + 8 + 16 + 8 + 8);
+        // priorities
+        for &p in &self.priority {
+            out.extend_from_slice(&p.to_le_bytes());
+        }
+        // pending
+        out.extend_from_slice(&self.pending.to_le_bytes());
+        // enable
+        out.extend_from_slice(&self.enable[0].to_le_bytes());
+        out.extend_from_slice(&self.enable[1].to_le_bytes());
+        // threshold
+        out.extend_from_slice(&self.threshold[0].to_le_bytes());
+        out.extend_from_slice(&self.threshold[1].to_le_bytes());
+        // claimed
+        out.extend_from_slice(&self.claimed[0].to_le_bytes());
+        out.extend_from_slice(&self.claimed[1].to_le_bytes());
+        out
+    }
+
+    /// Restore PLIC state from snapshot
+    pub fn restore_state(&mut self, data: &[u8]) -> std::io::Result<()> {
+        let mut pos = 0;
+        let read_u32 = |data: &[u8], pos: &mut usize| -> std::io::Result<u32> {
+            if *pos + 4 > data.len() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "plic",
+                ));
+            }
+            let v = u32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
+            *pos += 4;
+            Ok(v)
+        };
+        let read_u64 = |data: &[u8], pos: &mut usize| -> std::io::Result<u64> {
+            if *pos + 8 > data.len() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "plic",
+                ));
+            }
+            let v = u64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
+            *pos += 8;
+            Ok(v)
+        };
+        for i in 0..64 {
+            self.priority[i] = read_u32(data, &mut pos)?;
+        }
+        self.pending = read_u64(data, &mut pos)?;
+        self.enable[0] = read_u64(data, &mut pos)?;
+        self.enable[1] = read_u64(data, &mut pos)?;
+        self.threshold[0] = read_u32(data, &mut pos)?;
+        self.threshold[1] = read_u32(data, &mut pos)?;
+        self.claimed[0] = read_u32(data, &mut pos)?;
+        self.claimed[1] = read_u32(data, &mut pos)?;
+        Ok(())
+    }
+
     pub fn write(&mut self, offset: u64, val: u64) {
         match offset {
             0x000000..=0x0000FF => {

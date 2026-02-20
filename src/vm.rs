@@ -8,6 +8,7 @@ use crate::gdb::{GdbAction, GdbServer};
 use crate::loader;
 use crate::memory::rom::BootRom;
 use crate::memory::{Bus, DRAM_BASE};
+use crate::snapshot;
 
 pub struct VmConfig {
     pub kernel_path: PathBuf,
@@ -20,6 +21,8 @@ pub struct VmConfig {
     pub max_insns: Option<u64>,
     pub gdb_port: Option<u16>,
     pub timeout_secs: Option<u64>,
+    pub save_snapshot: Option<PathBuf>,
+    pub load_snapshot: Option<PathBuf>,
 }
 
 pub struct Vm {
@@ -151,6 +154,14 @@ impl Vm {
         } else {
             None
         };
+
+        // Load snapshot if provided (restores CPU, CSRs, RAM, devices)
+        if let Some(ref snap_path) = self.config.load_snapshot {
+            if let Err(e) = snapshot::load_snapshot(snap_path, &mut self.cpu, &mut self.bus) {
+                eprintln!("Failed to load snapshot: {}", e);
+                std::process::exit(1);
+            }
+        }
 
         log::info!("Starting emulation...");
 
@@ -341,6 +352,13 @@ impl Vm {
                     let ram = self.bus.ram.as_mut_slice();
                     self.bus.virtio_net.process_queues(ram, dram_base);
                 }
+            }
+        }
+
+        // Save snapshot if requested
+        if let Some(ref snap_path) = self.config.save_snapshot {
+            if let Err(e) = snapshot::save_snapshot(snap_path, &self.cpu, &mut self.bus) {
+                eprintln!("Failed to save snapshot: {}", e);
             }
         }
 

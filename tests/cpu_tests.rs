@@ -4716,3 +4716,133 @@ fn test_pmp_locked_restricts_mmode() {
         "Locked PMP with no X should cause instruction access fault even in M-mode"
     );
 }
+
+// ==================== Snapshot Tests ====================
+
+#[test]
+fn test_snapshot_save_restore_cpu_state() {
+    // Run a small program that sets registers
+    let instructions = vec![
+        0x00500093, // addi x1, x0, 5
+        0x00A00113, // addi x2, x0, 10
+        0x00F00193, // addi x3, x0, 15
+    ];
+    let (cpu, mut bus) = run_program(&instructions, 3);
+
+    // Save snapshot
+    let snap_path = std::path::PathBuf::from("/tmp/microvm-test-snap.bin");
+    microvm::snapshot::save_snapshot(&snap_path, &cpu, &mut bus).unwrap();
+
+    // Create fresh CPU+Bus and restore
+    let mut cpu2 = Cpu::new();
+    let mut bus2 = Bus::new(64 * 1024);
+    microvm::snapshot::load_snapshot(&snap_path, &mut cpu2, &mut bus2).unwrap();
+
+    // Verify registers
+    assert_eq!(cpu2.regs[1], 5);
+    assert_eq!(cpu2.regs[2], 10);
+    assert_eq!(cpu2.regs[3], 15);
+    assert_eq!(cpu2.pc, cpu.pc);
+    assert_eq!(cpu2.cycle, cpu.cycle);
+
+    // Clean up
+    let _ = std::fs::remove_file(&snap_path);
+}
+
+#[test]
+fn test_snapshot_preserves_ram() {
+    let mut bus = Bus::new(64 * 1024);
+    // Write some data to RAM
+    bus.write32(DRAM_BASE, 0xDEADBEEF);
+    bus.write64(DRAM_BASE + 0x100, 0x123456789ABCDEF0);
+
+    let cpu = Cpu::new();
+    let snap_path = std::path::PathBuf::from("/tmp/microvm-test-snap-ram.bin");
+    microvm::snapshot::save_snapshot(&snap_path, &cpu, &mut bus).unwrap();
+
+    // Restore into fresh VM
+    let mut cpu2 = Cpu::new();
+    let mut bus2 = Bus::new(64 * 1024);
+    microvm::snapshot::load_snapshot(&snap_path, &mut cpu2, &mut bus2).unwrap();
+
+    assert_eq!(bus2.read32(DRAM_BASE), 0xDEADBEEF);
+    assert_eq!(bus2.read64(DRAM_BASE + 0x100), 0x123456789ABCDEF0);
+
+    let _ = std::fs::remove_file(&snap_path);
+}
+
+#[test]
+fn test_snapshot_preserves_csrs() {
+    let mut cpu = Cpu::new();
+    cpu.csrs.write(csr::MTVEC, 0x80001000);
+    cpu.csrs.write(csr::STVEC, 0x80002000);
+    cpu.csrs.write(csr::MEPC, 0x80003000);
+    cpu.csrs.write(csr::SEPC, 0x80004000);
+
+    let mut bus = Bus::new(64 * 1024);
+    let snap_path = std::path::PathBuf::from("/tmp/microvm-test-snap-csr.bin");
+    microvm::snapshot::save_snapshot(&snap_path, &cpu, &mut bus).unwrap();
+
+    let mut cpu2 = Cpu::new();
+    let mut bus2 = Bus::new(64 * 1024);
+    microvm::snapshot::load_snapshot(&snap_path, &mut cpu2, &mut bus2).unwrap();
+
+    assert_eq!(cpu2.csrs.read(csr::MTVEC), 0x80001000);
+    assert_eq!(cpu2.csrs.read(csr::STVEC), 0x80002000);
+    assert_eq!(cpu2.csrs.read(csr::MEPC), 0x80003000);
+    assert_eq!(cpu2.csrs.read(csr::SEPC), 0x80004000);
+
+    let _ = std::fs::remove_file(&snap_path);
+}
+
+#[test]
+fn test_snapshot_invalid_magic() {
+    let snap_path = std::path::PathBuf::from("/tmp/microvm-test-snap-bad.bin");
+    std::fs::write(&snap_path, b"BADMAGIC").unwrap();
+
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new(64 * 1024);
+    let result = microvm::snapshot::load_snapshot(&snap_path, &mut cpu, &mut bus);
+    assert!(result.is_err());
+
+    let _ = std::fs::remove_file(&snap_path);
+}
+
+#[test]
+fn test_snapshot_ram_size_mismatch() {
+    let cpu = Cpu::new();
+    let mut bus = Bus::new(64 * 1024); // 64 KiB
+    let snap_path = std::path::PathBuf::from("/tmp/microvm-test-snap-mismatch.bin");
+    microvm::snapshot::save_snapshot(&snap_path, &cpu, &mut bus).unwrap();
+
+    let mut cpu2 = Cpu::new();
+    let mut bus2 = Bus::new(128 * 1024); // 128 KiB — different size
+    let result = microvm::snapshot::load_snapshot(&snap_path, &mut cpu2, &mut bus2);
+    assert!(result.is_err());
+
+    let _ = std::fs::remove_file(&snap_path);
+}
+
+#[test]
+fn test_snapshot_preserves_privilege_mode() {
+    let mut cpu = Cpu::new();
+    cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
+    cpu.pc = 0x80200000;
+    cpu.wfi = true;
+    cpu.reservation = Some(0x80001000);
+
+    let mut bus = Bus::new(64 * 1024);
+    let snap_path = std::path::PathBuf::from("/tmp/microvm-test-snap-mode.bin");
+    microvm::snapshot::save_snapshot(&snap_path, &cpu, &mut bus).unwrap();
+
+    let mut cpu2 = Cpu::new();
+    let mut bus2 = Bus::new(64 * 1024);
+    microvm::snapshot::load_snapshot(&snap_path, &mut cpu2, &mut bus2).unwrap();
+
+    assert_eq!(cpu2.mode, microvm::cpu::PrivilegeMode::Supervisor);
+    assert_eq!(cpu2.pc, 0x80200000);
+    assert!(cpu2.wfi);
+    assert_eq!(cpu2.reservation, Some(0x80001000));
+
+    let _ = std::fs::remove_file(&snap_path);
+}

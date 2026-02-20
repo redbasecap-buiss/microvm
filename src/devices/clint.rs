@@ -28,6 +28,19 @@ impl Clint {
         }
     }
 
+    /// Get mtimecmp value for snapshot
+    pub fn mtimecmp(&self) -> u64 {
+        self.mtimecmp
+    }
+
+    /// Restore CLINT state from snapshot
+    pub fn restore_state(&mut self, _mtime: u64, mtimecmp: u64, msip: bool) {
+        // mtime is derived from wall clock, can't restore exactly
+        // but mtimecmp and msip can be restored
+        self.mtimecmp = mtimecmp;
+        self.msip = if msip { 1 } else { 0 };
+    }
+
     /// Current mtime value
     pub fn mtime(&self) -> u64 {
         let elapsed = self.start.elapsed();

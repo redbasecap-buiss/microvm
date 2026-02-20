@@ -7,6 +7,7 @@ mod dtb;
 mod gdb;
 mod loader;
 mod memory;
+mod snapshot;
 mod vm;
 
 #[derive(Parser)]
@@ -86,6 +87,14 @@ enum Commands {
         /// Stop after N seconds of wall-clock time
         #[arg(long)]
         timeout_secs: Option<u64>,
+
+        /// Save VM snapshot to file on exit (Ctrl-C or timeout)
+        #[arg(long)]
+        save_snapshot: Option<PathBuf>,
+
+        /// Load VM snapshot from file before running
+        #[arg(long)]
+        load_snapshot: Option<PathBuf>,
     },
 }
 
@@ -125,6 +134,8 @@ fn main() {
             max_insns,
             gdb: gdb_port,
             timeout_secs,
+            save_snapshot,
+            load_snapshot,
         } => {
             let addr = u64::from_str_radix(load_addr.trim_start_matches("0x"), 16)
                 .expect("Invalid load address");
@@ -140,6 +151,8 @@ fn main() {
                 max_insns,
                 gdb_port,
                 timeout_secs,
+                save_snapshot,
+                load_snapshot,
             };
 
             let mut vm = vm::Vm::new(config);

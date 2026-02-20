@@ -149,6 +149,67 @@ impl Uart {
         }
     }
 
+    /// Save UART state for snapshot
+    pub fn save_state(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        // rx_buf length + data
+        let rx_len = self.rx_buf.len() as u32;
+        out.extend_from_slice(&rx_len.to_le_bytes());
+        for &b in &self.rx_buf {
+            out.push(b);
+        }
+        // Registers
+        out.push(self.lsr);
+        out.push(self.ier);
+        out.push(self.lcr);
+        out.push(self.mcr);
+        out.push(self.dll);
+        out.push(self.dlm);
+        out.push(self.fcr);
+        out.push(self.scr);
+        out.push(if self.thre_pending { 1 } else { 0 });
+        out
+    }
+
+    /// Restore UART state from snapshot
+    pub fn restore_state(&mut self, data: &[u8]) -> std::io::Result<()> {
+        if data.len() < 4 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "uart",
+            ));
+        }
+        let rx_len = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+        let mut pos = 4;
+        self.rx_buf.clear();
+        for _ in 0..rx_len {
+            if pos >= data.len() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "uart rx",
+                ));
+            }
+            self.rx_buf.push_back(data[pos]);
+            pos += 1;
+        }
+        if pos + 9 > data.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "uart regs",
+            ));
+        }
+        self.lsr = data[pos];
+        self.ier = data[pos + 1];
+        self.lcr = data[pos + 2];
+        self.mcr = data[pos + 3];
+        self.dll = data[pos + 4];
+        self.dlm = data[pos + 5];
+        self.fcr = data[pos + 6];
+        self.scr = data[pos + 7];
+        self.thre_pending = data[pos + 8] != 0;
+        Ok(())
+    }
+
     pub fn write(&mut self, offset: u64, val: u64) {
         let val = val as u8;
         let dlab = (self.lcr >> 7) & 1;
