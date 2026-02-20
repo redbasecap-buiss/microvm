@@ -235,16 +235,43 @@ impl Vm {
             }
 
             if trace {
-                eprintln!(
-                    "[{:>10}] PC={:#010x} mode={:?} a0={:#x} a1={:#x} a7={:#x} sp={:#x}",
-                    insn_count,
-                    self.cpu.pc,
-                    self.cpu.mode,
-                    self.cpu.regs[10],
-                    self.cpu.regs[11],
-                    self.cpu.regs[17],
-                    self.cpu.regs[2],
-                );
+                // Fetch and disassemble current instruction for trace
+                let trace_pc = self.cpu.pc;
+                let phys_pc = self
+                    .cpu
+                    .mmu
+                    .translate(
+                        trace_pc,
+                        crate::cpu::mmu::AccessType::Execute,
+                        self.cpu.mode,
+                        &self.cpu.csrs,
+                        &mut self.bus,
+                    )
+                    .unwrap_or(trace_pc);
+                let raw16 = self.bus.read16(phys_pc);
+                let (inst_raw, is_compressed) = if raw16 & 0x03 != 0x03 {
+                    let expanded = crate::cpu::decode::expand_compressed(raw16 as u32);
+                    (expanded, true)
+                } else {
+                    (self.bus.read32(phys_pc), false)
+                };
+                let disasm = crate::cpu::disasm::disassemble(inst_raw, trace_pc);
+                let mode_ch = match self.cpu.mode {
+                    crate::cpu::PrivilegeMode::Machine => 'M',
+                    crate::cpu::PrivilegeMode::Supervisor => 'S',
+                    crate::cpu::PrivilegeMode::User => 'U',
+                };
+                if is_compressed {
+                    eprintln!(
+                        "[{:>10}] {:#010x} ({:04x})     {}: {}",
+                        insn_count, trace_pc, raw16, mode_ch, disasm
+                    );
+                } else {
+                    eprintln!(
+                        "[{:>10}] {:#010x} {:08x}  {}: {}",
+                        insn_count, trace_pc, inst_raw, mode_ch, disasm
+                    );
+                }
             }
 
             if !self.cpu.step(&mut self.bus) {

@@ -1113,25 +1113,13 @@ fn handle_sbi_call(cpu: &mut Cpu, bus: &mut Bus) -> bool {
                 0 => {
                     // sbi_debug_console_write
                     // a0 = num_bytes, a1 = base_addr_lo, a2 = base_addr_hi
+                    // Per SBI spec: base_addr is a PHYSICAL address (not virtual)
                     let num_bytes = a0 as usize;
-                    let base_addr = cpu.regs[11]; // a1
+                    let base_addr = cpu.regs[11] | (cpu.regs[12] << 32); // a1 | (a2 << 32)
                     use std::io::Write;
                     let mut stdout = std::io::stdout().lock();
                     for i in 0..num_bytes {
-                        let phys = match cpu.mmu.translate(
-                            base_addr + i as u64,
-                            super::mmu::AccessType::Read,
-                            cpu.mode,
-                            &cpu.csrs,
-                            bus,
-                        ) {
-                            Ok(a) => a,
-                            Err(_) => {
-                                cpu.regs[10] = (-1i64) as u64; // SBI_ERR_INVALID_ADDRESS
-                                cpu.regs[11] = i as u64;
-                                return true;
-                            }
-                        };
+                        let phys = base_addr + i as u64;
                         let byte = bus.read8(phys);
                         let _ = stdout.write_all(&[byte]);
                     }

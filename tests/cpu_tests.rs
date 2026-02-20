@@ -3488,3 +3488,290 @@ fn test_smode_ecall_from_umode() {
         cpu.regs[16], scause_csr, cpu.pc, cpu.mode, cpu.csrs.read(csr::SEPC)
     );
 }
+
+// ====================================================================
+// Sv39 4KiB page table test — multi-level page walk
+// ====================================================================
+
+#[test]
+fn test_sv39_4k_page_table_walk() {
+    // This test creates a 3-level Sv39 page table with 4KiB pages
+    // (not gigapages) and verifies virtual memory works correctly.
+    //
+    // Virtual address 0x80200000 → Physical address 0x80400000 (remapped!)
+    //
+    // Sv39 address breakdown for 0x80200000:
+    //   VPN[2] = (0x80200000 >> 30) & 0x1FF = 0x200 (512 >> 9 bits... wait)
+    //   0x80200000 = 0b 10_000000_00 1_00000000_0 000000000_000000000000
+    //   VPN[2] = bits[38:30] = 0b100000000 = 256
+    //   VPN[1] = bits[29:21] = 0b000000001 = 1
+    //   VPN[0] = bits[20:12] = 0b000000000 = 0
+    //   offset = bits[11:0] = 0
+    //
+    // We also identity-map DRAM_BASE region for code execution.
+
+    let mut bus = Bus::new(16 * 1024 * 1024); // 16 MiB RAM
+    let mut cpu = Cpu::new();
+
+    // Memory layout in RAM (offsets from DRAM_BASE):
+    // 0x000000: code (runs identity-mapped)
+    // 0x200000: L0 page table (root)
+    // 0x201000: L1 page table for VPN[2]=256
+    // 0x202000: L2 page table for VPN[1]=1
+    // 0x400000: data page (physical, mapped at virtual 0x80200000)
+
+    let root_pt_offset = 0x200000u64;
+    let l1_pt_offset = 0x201000u64;
+    let l2_pt_offset = 0x202000u64;
+    let data_page_offset = 0x400000u64;
+    let data_phys_addr = DRAM_BASE + data_page_offset;
+
+    // Write test data at the data page
+    let test_value: u64 = 0xDEAD_BEEF_CAFE_1234;
+    bus.write64(data_phys_addr, test_value);
+
+    // Build page tables:
+    // L0 (root) table at root_pt_offset:
+    //   Entry[0] (VPN[2]=0): 1GiB superpage → identity map DRAM_BASE
+    //     PTE = (DRAM_BASE >> 12) << 10 | 0xEF (V|R|W|X|A|D|U=0)
+    //     But we want S-mode access, so no U bit. Flags = V|R|W|X|A|D = 0xEF
+    let dram_ppn = DRAM_BASE >> 12;
+    let superpage_pte = (dram_ppn << 10) | 0xEF; // V|R|W|X|A|D, S-mode
+    bus.ram.write64(root_pt_offset + 0 * 8, superpage_pte); // entry[0] — won't match VPN[2]=256
+
+    //   Actually VPN[2]=256 for 0x80200000 and VPN[2]=256 for 0x80000000 (code)
+    //   So we need entry[256] to point to L1 table (non-leaf)
+    //   And we need a separate identity map for code.
+    //
+    //   Wait: 0x80000000 >> 30 = 2, then & 0x1FF = 2. Let me recalculate.
+    //   Sv39: virtual address is sign-extended from bit 38.
+    //   0x80200000 has bit 31 set but bits 38:32 are 0 (it's a 32-bit addr),
+    //   so Sv39 VPN[2] = (0x80200000 >> 30) & 0x1FF = 2.
+    //   VPN[1] = (0x80200000 >> 21) & 0x1FF = 1.
+    //   VPN[0] = (0x80200000 >> 12) & 0x1FF = 0.
+    //   And 0x80000000: VPN[2]=2, VPN[1]=0, VPN[0]=0.
+
+    // So entry[2] in root table needs to point to L1.
+    let l1_ppn = (DRAM_BASE + l1_pt_offset) >> 12;
+    let l1_pte = (l1_ppn << 10) | 0x01; // V only, non-leaf
+    bus.ram.write64(root_pt_offset + 2 * 8, l1_pte);
+
+    // L1 table at l1_pt_offset:
+    //   Entry[0] (VPN[1]=0): 2MiB superpage identity map for DRAM_BASE (code)
+    let code_ppn = DRAM_BASE >> 12;
+    let code_pte = (code_ppn << 10) | 0xEF; // V|R|W|X|A|D
+    bus.ram.write64(l1_pt_offset + 0 * 8, code_pte);
+
+    //   Entry[1] (VPN[1]=1): points to L2 table (non-leaf)
+    let l2_ppn = (DRAM_BASE + l2_pt_offset) >> 12;
+    let l2_pte = (l2_ppn << 10) | 0x01; // V only, non-leaf
+    bus.ram.write64(l1_pt_offset + 1 * 8, l2_pte);
+
+    // L2 table at l2_pt_offset:
+    //   Entry[0] (VPN[0]=0): 4KiB page → data_phys_addr
+    let data_ppn = data_phys_addr >> 12;
+    let data_pte = (data_ppn << 10) | 0xEF; // V|R|W|X|A|D
+    bus.ram.write64(l2_pt_offset + 0 * 8, data_pte);
+
+    // S-mode program:
+    // 1. Load satp with Sv39 mode and root page table PPN
+    // 2. sfence.vma
+    // 3. Load from virtual address 0x80200000 → should read test_value from 0x80400000
+    // 4. Store result to x10 (a0)
+    let root_ppn = (DRAM_BASE + root_pt_offset) >> 12;
+    let satp_val = (8u64 << 60) | root_ppn; // Sv39
+
+    let mut code: Vec<u32> = Vec::new();
+
+    // Load satp value into t0
+    // satp_val = 0x8000000000080200 — need full 64-bit load
+    // Use lui+addi chain for the constant
+    // Simpler: pre-set t0 register
+    // Actually let's use the register preset approach
+
+    // csrw satp, t0
+    code.push(0x18029073); // csrw satp, t0
+
+    // sfence.vma zero, zero
+    code.push(0x12000073); // sfence.vma
+
+    // lui t1, 0x80200 → t1 = 0xFFFFFFFF80200000 (sign-extended)
+    // Actually on RV64, lui 0x80200 gives: (0x80200 << 12) sign-extended from 32 bits
+    // = 0x80200000, which sign-extends to 0xFFFFFFFF80200000.
+    // But our virtual address is 0x80200000 (positive in Sv39 space? No...)
+    // Sv39: addresses must be canonicalized. Bit 38 determines sign extension.
+    // 0x80200000 has bit 38 = 0, so it IS canonical in Sv39 (in the low half).
+    // But 0xFFFFFFFF80200000 has bit 38 = 1, which makes it a different address.
+    // We need the actual value 0x80200000. With LUI we get sign-extension from bit 31.
+    // For a 32-bit value with bit 31 set, we need to zero-extend.
+    // Use: lui t1, 0x80200; slli t1, t1, 32; srli t1, t1, 32
+    code.push(0x80200337); // lui t1, 0x80200
+    code.push(0x02031313); // slli t1, t1, 32
+    code.push(0x02035313); // srli t1, t1, 32
+
+    // ld a0, 0(t1) — load from virtual address 0x80200000
+    code.push(0x00033503); // ld a0, 0(t1)
+
+    // Write a0 to a known physical location so we can verify
+    // Loop forever (nop loop)
+    code.push(0x0000006F); // j 0 (infinite loop)
+
+    let bytes: Vec<u8> = code.iter().flat_map(|i: &u32| i.to_le_bytes()).collect();
+    bus.load_binary(&bytes, 0x100000); // code at offset 0x100000
+
+    let kernel_entry = DRAM_BASE + 0x100000;
+
+    // Boot into S-mode using BootRom
+    let dtb_data = microvm::dtb::generate_dtb(16 * 1024 * 1024, "", false, None);
+    let dtb_addr = DRAM_BASE + 16 * 1024 * 1024 - 0x1000;
+    bus.load_binary(&dtb_data, dtb_addr - DRAM_BASE);
+
+    let boot_code = microvm::memory::rom::BootRom::generate(kernel_entry, dtb_addr);
+    bus.load_binary(&boot_code, 0);
+
+    cpu.reset(DRAM_BASE);
+
+    // Run boot ROM to reach S-mode
+    for _ in 0..200 {
+        if cpu.pc == kernel_entry && cpu.mode == microvm::cpu::PrivilegeMode::Supervisor {
+            break;
+        }
+        cpu.step(&mut bus);
+    }
+    assert_eq!(cpu.pc, kernel_entry, "Should reach kernel entry");
+    assert_eq!(cpu.mode, microvm::cpu::PrivilegeMode::Supervisor);
+
+    // Set up registers for the S-mode code
+    cpu.regs[5] = satp_val; // t0 = satp value
+
+    // Run the S-mode code
+    for i in 0..100 {
+        if !cpu.step(&mut bus) {
+            panic!("HALT at step {} PC={:#x}", i, cpu.pc);
+        }
+        // Check if we hit the infinite loop (j 0)
+        let phys_pc = cpu
+            .mmu
+            .translate(
+                cpu.pc,
+                microvm::cpu::mmu::AccessType::Execute,
+                cpu.mode,
+                &cpu.csrs,
+                &mut bus,
+            )
+            .unwrap_or(cpu.pc);
+        let inst = bus.read32(phys_pc);
+        if inst == 0x0000006F {
+            break;
+        }
+    }
+
+    // Verify: a0 should contain the test value
+    assert_eq!(
+        cpu.regs[10], test_value,
+        "a0 should contain test data loaded through 4KiB page mapping, got {:#x}",
+        cpu.regs[10]
+    );
+
+    // The 4KiB page walk succeeded — virtual 0x80200000 → physical 0x80400000
+}
+
+// ====================================================================
+// DTB structure validation test
+// ====================================================================
+
+#[test]
+fn test_dtb_structure_valid_fdt() {
+    // Generate a DTB and verify it has valid FDT structure
+    let dtb = microvm::dtb::generate_dtb(
+        256 * 1024 * 1024,
+        "console=ttyS0 earlycon",
+        true,
+        Some((0x8F000000, 0x8F100000)),
+    );
+
+    // Check FDT magic
+    let magic = u32::from_be_bytes([dtb[0], dtb[1], dtb[2], dtb[3]]);
+    assert_eq!(magic, 0xD00DFEED, "FDT magic should be 0xD00DFEED");
+
+    // Check total size matches
+    let total_size = u32::from_be_bytes([dtb[4], dtb[5], dtb[6], dtb[7]]) as usize;
+    assert_eq!(
+        total_size,
+        dtb.len(),
+        "FDT total_size should match actual length"
+    );
+
+    // Check version
+    let version = u32::from_be_bytes([dtb[20], dtb[21], dtb[22], dtb[23]]);
+    assert_eq!(version, 17, "FDT version should be 17");
+
+    // Verify the DTB contains expected strings
+    let dtb_str = String::from_utf8_lossy(&dtb);
+    assert!(
+        dtb_str.contains("console=ttyS0"),
+        "DTB should contain bootargs"
+    );
+    assert!(
+        dtb_str.contains("rv64imafdc"),
+        "DTB should contain ISA string"
+    );
+    assert!(
+        dtb_str.contains("riscv,sv48"),
+        "DTB should contain mmu-type"
+    );
+    assert!(
+        dtb_str.contains("ns16550a"),
+        "DTB should contain UART compatible"
+    );
+    assert!(
+        dtb_str.contains("virtio,mmio"),
+        "DTB should contain VirtIO compatible"
+    );
+    assert!(
+        dtb_str.contains("google,goldfish-rtc"),
+        "DTB should contain RTC compatible"
+    );
+    assert!(
+        dtb_str.contains("syscon-poweroff"),
+        "DTB should contain poweroff node"
+    );
+    assert!(dtb_str.contains("riscv,clint0"), "DTB should contain CLINT");
+    assert!(dtb_str.contains("riscv,plic0"), "DTB should contain PLIC");
+}
+
+// ====================================================================
+// Disassembler integration test
+// ====================================================================
+
+#[test]
+fn test_disasm_round_trip_with_execution() {
+    // Verify disassembler handles all instruction types that execute correctly
+    let instructions = vec![
+        0x00500513u32, // addi a0, zero, 5
+        0x00300593,    // addi a1, zero, 3
+        0x00B50633,    // add a2, a0, a1
+        0x40B50633,    // sub a2, a0, a1
+        0x02B50533,    // mul a0, a0, a1
+    ];
+
+    // All should produce non-empty disassembly
+    for (i, &inst) in instructions.iter().enumerate() {
+        let disasm = microvm::cpu::disasm::disassemble(inst, DRAM_BASE + i as u64 * 4);
+        assert!(
+            !disasm.is_empty(),
+            "Instruction {:#010x} should disassemble",
+            inst
+        );
+        assert!(
+            !disasm.starts_with(".word"),
+            "Instruction {:#010x} should be recognized: {}",
+            inst,
+            disasm
+        );
+    }
+
+    // Execute and verify
+    let (cpu, _) = run_program(&instructions, 5);
+    assert_eq!(cpu.regs[10], 15); // 5 * 3 = 15
+}

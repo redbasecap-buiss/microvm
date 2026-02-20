@@ -1,5 +1,6 @@
 pub mod csr;
 pub mod decode;
+pub mod disasm;
 pub mod execute;
 pub mod fpu;
 pub mod mmu;
