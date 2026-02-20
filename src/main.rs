@@ -22,6 +22,25 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Dump the generated Device Tree in DTS (source) format
+    Dts {
+        /// RAM size in MiB (default: 128)
+        #[arg(short, long, default_value = "128")]
+        memory: u64,
+
+        /// Include VirtIO block device in DTB
+        #[arg(long)]
+        disk: bool,
+
+        /// Include initrd region in DTB
+        #[arg(long)]
+        initrd: bool,
+
+        /// Kernel command line
+        #[arg(long, default_value = "console=ttyS0")]
+        cmdline: String,
+    },
+
     /// Run a kernel or bare-metal binary
     Run {
         /// Path to kernel image (ELF or raw binary)
@@ -75,6 +94,25 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Dts {
+            memory: mem_size,
+            disk,
+            initrd,
+            cmdline,
+        } => {
+            let ram_bytes = mem_size * 1024 * 1024;
+            let initrd_info = if initrd {
+                // Dummy initrd region for display purposes
+                let initrd_start = memory::DRAM_BASE + ram_bytes - 0x100000;
+                let initrd_end = initrd_start + 0x100000;
+                Some((initrd_start, initrd_end))
+            } else {
+                None
+            };
+            let dtb_data = dtb::generate_dtb(ram_bytes, &cmdline, disk, initrd_info);
+            let dts = dtb::dtb_to_dts(&dtb_data);
+            print!("{dts}");
+        }
         Commands::Run {
             kernel,
             disk,

@@ -3775,3 +3775,111 @@ fn test_disasm_round_trip_with_execution() {
     let (cpu, _) = run_program(&instructions, 5);
     assert_eq!(cpu.regs[10], 15); // 5 * 3 = 15
 }
+
+// ============================================================
+// DTB-to-DTS decompiler tests
+// ============================================================
+
+#[test]
+fn test_dtb_to_dts_basic() {
+    let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "console=ttyS0", false, None);
+    let dts = microvm::dtb::dtb_to_dts(&dtb);
+
+    assert!(
+        dts.starts_with("/dts-v1/;"),
+        "DTS should start with version tag"
+    );
+    assert!(dts.contains("/ {"), "DTS should have root node");
+    assert!(dts.contains("compatible = \"microvm,riscv-virt\""));
+    assert!(dts.contains("bootargs = \"console=ttyS0\""));
+    assert!(dts.contains("memory@80000000"));
+    assert!(dts.contains("cpu@0"));
+    assert!(dts.contains("riscv,isa ="));
+    assert!(dts.contains("clint@"));
+    assert!(dts.contains("plic@"));
+    assert!(dts.contains("uart@"));
+}
+
+#[test]
+fn test_dtb_to_dts_with_disk() {
+    let dtb = microvm::dtb::generate_dtb(64 * 1024 * 1024, "root=/dev/vda", true, None);
+    let dts = microvm::dtb::dtb_to_dts(&dtb);
+
+    assert!(dts.contains("bootargs = \"root=/dev/vda\""));
+    // With disk=true, there should be an extra virtio_mmio node for block device
+    assert!(
+        dts.contains("virtio_mmio@10001000"),
+        "Should have virtio block device"
+    );
+}
+
+#[test]
+fn test_dtb_to_dts_with_initrd() {
+    let initrd_start = 0x84000000u64;
+    let initrd_end = 0x84100000u64;
+    let dtb = microvm::dtb::generate_dtb(
+        128 * 1024 * 1024,
+        "console=ttyS0",
+        false,
+        Some((initrd_start, initrd_end)),
+    );
+    let dts = microvm::dtb::dtb_to_dts(&dtb);
+
+    // initrd properties use u64 (8 bytes), displayed as <hi lo>
+    assert!(
+        dts.contains("linux,initrd-start"),
+        "Should have initrd-start"
+    );
+    assert!(dts.contains("linux,initrd-end"), "Should have initrd-end");
+}
+
+#[test]
+fn test_dtb_to_dts_invalid_input() {
+    let dts = microvm::dtb::dtb_to_dts(&[]);
+    assert!(dts.contains("invalid DTB"));
+
+    let mut bad_magic = vec![0xDE, 0xAD, 0xBE, 0xEF];
+    bad_magic.extend_from_slice(&[0u8; 36]); // pad to 40 bytes
+    let dts = microvm::dtb::dtb_to_dts(&bad_magic);
+    assert!(dts.contains("invalid DTB magic"));
+}
+
+#[test]
+fn test_dtb_to_dts_isa_extensions_stringlist() {
+    let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "console=ttyS0", false, None);
+    let dts = microvm::dtb::dtb_to_dts(&dtb);
+
+    // isa-extensions should render as a stringlist
+    assert!(
+        dts.contains("riscv,isa-extensions = \"i\""),
+        "ISA extensions should be a stringlist: {}",
+        dts
+    );
+}
+
+#[test]
+fn test_dtb_to_dts_all_devices() {
+    let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "console=ttyS0", true, None);
+    let dts = microvm::dtb::dtb_to_dts(&dtb);
+
+    // Check all device nodes
+    assert!(dts.contains("syscon@"), "Should have syscon");
+    assert!(dts.contains("poweroff"), "Should have poweroff node");
+    assert!(dts.contains("reboot"), "Should have reboot node");
+    assert!(dts.contains("rtc@"), "Should have RTC");
+    assert!(dts.contains("google,goldfish-rtc"), "RTC compatible");
+    assert!(dts.contains("riscv,plic0"), "PLIC compatible");
+    assert!(dts.contains("riscv,clint0"), "CLINT compatible");
+    assert!(dts.contains("ns16550a"), "UART compatible");
+    assert!(dts.contains("phandle"), "Should have phandle references");
+}
+
+#[test]
+fn test_dtb_to_dts_roundtrip_consistency() {
+    // Generate DTB twice with same params — DTS output should be identical
+    let dtb1 = microvm::dtb::generate_dtb(256 * 1024 * 1024, "earlycon", true, None);
+    let dtb2 = microvm::dtb::generate_dtb(256 * 1024 * 1024, "earlycon", true, None);
+    let dts1 = microvm::dtb::dtb_to_dts(&dtb1);
+    let dts2 = microvm::dtb::dtb_to_dts(&dtb2);
+    assert_eq!(dts1, dts2, "Same params should produce identical DTS");
+}

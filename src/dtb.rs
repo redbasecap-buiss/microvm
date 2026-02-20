@@ -168,6 +168,182 @@ impl DtbBuilder {
     }
 }
 
+/// Decompile a DTB (Flattened Device Tree) into human-readable DTS format.
+/// This is useful for debugging boot issues — equivalent to `dtc -I dtb -O dts`.
+pub fn dtb_to_dts(dtb: &[u8]) -> String {
+    if dtb.len() < 40 {
+        return "/* invalid DTB: too short */\n".to_string();
+    }
+
+    let magic = u32::from_be_bytes([dtb[0], dtb[1], dtb[2], dtb[3]]);
+    if magic != FDT_MAGIC {
+        return format!("/* invalid DTB magic: {:#x} */\n", magic);
+    }
+
+    let off_dt_struct = u32::from_be_bytes([dtb[8], dtb[9], dtb[10], dtb[11]]) as usize;
+    let off_dt_strings = u32::from_be_bytes([dtb[12], dtb[13], dtb[14], dtb[15]]) as usize;
+
+    let mut out = String::from("/dts-v1/;\n\n");
+    let mut pos = off_dt_struct;
+    let mut depth: usize = 0;
+
+    loop {
+        if pos + 4 > dtb.len() {
+            break;
+        }
+        let token = u32::from_be_bytes([dtb[pos], dtb[pos + 1], dtb[pos + 2], dtb[pos + 3]]);
+        pos += 4;
+
+        match token {
+            FDT_BEGIN_NODE => {
+                let name = read_cstr(dtb, pos);
+                pos += name.len() + 1;
+                pos = align4_pos(pos);
+
+                let indent = "\t".repeat(depth);
+                if name.is_empty() {
+                    out.push_str(&format!("{indent}/ {{\n"));
+                } else {
+                    out.push_str(&format!("{indent}{name} {{\n"));
+                }
+                depth += 1;
+            }
+            FDT_END_NODE => {
+                depth = depth.saturating_sub(1);
+                let indent = "\t".repeat(depth);
+                out.push_str(&format!("{indent}}};\n"));
+            }
+            FDT_PROP => {
+                if pos + 8 > dtb.len() {
+                    break;
+                }
+                let len = u32::from_be_bytes([dtb[pos], dtb[pos + 1], dtb[pos + 2], dtb[pos + 3]])
+                    as usize;
+                let name_off =
+                    u32::from_be_bytes([dtb[pos + 4], dtb[pos + 5], dtb[pos + 6], dtb[pos + 7]])
+                        as usize;
+                pos += 8;
+
+                let prop_name = read_cstr(dtb, off_dt_strings + name_off);
+                let data = if pos + len <= dtb.len() {
+                    &dtb[pos..pos + len]
+                } else {
+                    &[]
+                };
+                pos += len;
+                pos = align4_pos(pos);
+
+                let indent = "\t".repeat(depth);
+                if len == 0 {
+                    out.push_str(&format!("{indent}{prop_name};\n"));
+                } else {
+                    let val = format_prop_value(&prop_name, data);
+                    out.push_str(&format!("{indent}{prop_name} = {val};\n"));
+                }
+            }
+            FDT_END => break,
+            _ => {
+                // Skip NOP or unknown tokens
+            }
+        }
+    }
+
+    out
+}
+
+/// Read a null-terminated string from a byte slice at the given offset.
+fn read_cstr(data: &[u8], offset: usize) -> String {
+    let mut end = offset;
+    while end < data.len() && data[end] != 0 {
+        end += 1;
+    }
+    String::from_utf8_lossy(&data[offset..end]).to_string()
+}
+
+/// Align position up to 4-byte boundary.
+fn align4_pos(pos: usize) -> usize {
+    (pos + 3) & !3
+}
+
+/// Format a property value for DTS output.
+/// Heuristics: if data looks like a null-terminated string (or stringlist), show as string.
+/// If length is a multiple of 4, show as <cell array>. Otherwise hex bytes.
+fn format_prop_value(name: &str, data: &[u8]) -> String {
+    // Known string properties
+    let string_props = [
+        "compatible",
+        "model",
+        "device_type",
+        "bootargs",
+        "stdout-path",
+        "riscv,isa",
+        "riscv,isa-base",
+        "mmu-type",
+        "status",
+    ];
+
+    // Check if it's a stringlist (multiple null-terminated strings)
+    if is_stringlist(data) && data.len() > 1 {
+        let strings: Vec<&str> = data[..data.len() - 1] // strip trailing null
+            .split(|&b| b == 0)
+            .filter_map(|s| std::str::from_utf8(s).ok())
+            .collect();
+        if !strings.is_empty()
+            && (string_props.contains(&name) || strings.iter().all(|s| is_printable_str(s)))
+        {
+            let quoted: Vec<String> = strings.iter().map(|s| format!("\"{s}\"")).collect();
+            return quoted.join(", ");
+        }
+    }
+
+    // Single string
+    if data.len() > 1 && data[data.len() - 1] == 0 {
+        if let Ok(s) = std::str::from_utf8(&data[..data.len() - 1]) {
+            if is_printable_str(s) {
+                return format!("\"{s}\"");
+            }
+        }
+    }
+
+    // u32 array
+    if data.len().is_multiple_of(4) && !data.is_empty() {
+        let cells: Vec<String> = data
+            .chunks(4)
+            .map(|c| {
+                let v = u32::from_be_bytes([c[0], c[1], c[2], c[3]]);
+                format!("{:#x}", v)
+            })
+            .collect();
+        return format!("<{}>", cells.join(" "));
+    }
+
+    // Raw bytes
+    let hex: Vec<String> = data.iter().map(|b| format!("{:02x}", b)).collect();
+    format!("[{}]", hex.join(" "))
+}
+
+/// Check if data is a valid stringlist (one or more null-terminated printable strings).
+fn is_stringlist(data: &[u8]) -> bool {
+    if data.is_empty() || data[data.len() - 1] != 0 {
+        return false;
+    }
+    let parts: Vec<&[u8]> = data[..data.len() - 1].split(|&b| b == 0).collect();
+    if parts.is_empty() {
+        return false;
+    }
+    parts.iter().all(|p| {
+        !p.is_empty()
+            && std::str::from_utf8(p)
+                .map(is_printable_str)
+                .unwrap_or(false)
+    })
+}
+
+/// Check if a string contains only printable ASCII characters.
+fn is_printable_str(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_graphic() || b == b' ')
+}
+
 /// Generate a Device Tree Blob for Linux boot
 /// `initrd_info` is an optional (start, end) pair of physical addresses for the initrd.
 pub fn generate_dtb(
