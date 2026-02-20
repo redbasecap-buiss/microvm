@@ -195,6 +195,7 @@ impl Mmu {
         let levels = match satp_mode {
             8 => 3,                // Sv39
             9 => 4,                // Sv48
+            10 => 5,               // Sv57
             _ => return Ok(vaddr), // Unsupported mode, treat as bare
         };
 
@@ -202,11 +203,12 @@ impl Mmu {
         let page_offset = vaddr & 0xFFF;
 
         // Extract VPN fields (each 9 bits)
-        let vpn: [u64; 4] = [
+        let vpn: [u64; 5] = [
             (vaddr >> 12) & 0x1FF,
             (vaddr >> 21) & 0x1FF,
             (vaddr >> 30) & 0x1FF,
             (vaddr >> 39) & 0x1FF,
+            (vaddr >> 48) & 0x1FF,
         ];
 
         let mut a = ppn << 12;
@@ -234,9 +236,10 @@ impl Mmu {
 
             // Superpage alignment check: lower PPN bits must be zero
             let misaligned = match level {
-                3 => ((pte >> 10) & 0x7FFFFFF) != 0, // 512 GiB (Sv48 level 3)
-                2 => ((pte >> 10) & 0x3FFFF) != 0,   // 1 GiB
-                1 => ((pte >> 10) & 0x1FF) != 0,     // 2 MiB
+                4 => ((pte >> 10) & 0xFFFFFFFFF) != 0, // 256 TiB (Sv57 level 4)
+                3 => ((pte >> 10) & 0x7FFFFFF) != 0,   // 512 GiB (Sv48 level 3)
+                2 => ((pte >> 10) & 0x3FFFF) != 0,     // 1 GiB
+                1 => ((pte >> 10) & 0x1FF) != 0,       // 2 MiB
                 _ => false,
             };
             if misaligned {
@@ -257,7 +260,8 @@ impl Mmu {
             // Construct physical address
             let ppn_pte = (pte >> 10) & 0xFFF_FFFF_FFFF;
             let page_shift = match level {
-                3 => 39u8,
+                4 => 48u8,
+                3 => 39,
                 2 => 30,
                 1 => 21,
                 0 => 12,
@@ -265,10 +269,11 @@ impl Mmu {
             };
             let offset_mask = (1u64 << page_shift) - 1;
             let phys = match level {
-                3 => (ppn_pte & !0x7FFFFFF) << 12 | (vaddr & 0xFF_FFFF_FFFF), // 512 GiB
-                2 => (ppn_pte & !0x3FFFF) << 12 | (vaddr & 0x3FFFFFFF),       // 1 GiB
-                1 => (ppn_pte & !0x1FF) << 12 | (vaddr & 0x1FFFFF),           // 2 MiB
-                0 => (ppn_pte << 12) | page_offset,                           // 4 KiB
+                4 => (ppn_pte & !0xFFFFFFFFF) << 12 | (vaddr & ((1u64 << 48) - 1)), // 256 TiB
+                3 => (ppn_pte & !0x7FFFFFF) << 12 | (vaddr & 0xFF_FFFF_FFFF),       // 512 GiB
+                2 => (ppn_pte & !0x3FFFF) << 12 | (vaddr & 0x3FFFFFFF),             // 1 GiB
+                1 => (ppn_pte & !0x1FF) << 12 | (vaddr & 0x1FFFFF),                 // 2 MiB
+                0 => (ppn_pte << 12) | page_offset,                                 // 4 KiB
                 _ => unreachable!(),
             };
 

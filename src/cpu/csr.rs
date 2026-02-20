@@ -316,9 +316,9 @@ impl CsrFile {
             0xB03..=0xB1F | 0x323..=0x33F => {}
             MENVCFGH => {} // RV64: writes ignored
             SATP => {
-                // Accept mode 0 (Bare), 8 (Sv39), 9 (Sv48); ignore unsupported modes
+                // Accept mode 0 (Bare), 8 (Sv39), 9 (Sv48), 10 (Sv57); ignore unsupported modes
                 let mode = val >> 60;
-                if mode == 0 || mode == 8 || mode == 9 {
+                if mode == 0 || mode == 8 || mode == 9 || mode == 10 {
                     self.regs.insert(SATP, val);
                 }
                 // Writes with unsupported modes are silently ignored (spec allows this)

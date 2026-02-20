@@ -1276,10 +1276,15 @@ fn test_satp_mode_validation() {
     csrs.write(csr::SATP, sv48);
     assert_eq!(csrs.read(csr::SATP), sv48);
 
-    // Mode 10 (unsupported) should be ignored — still has Sv48 value
-    let bad_mode = 10u64 << 60 | 0xAAAAA;
+    // Mode 10 (Sv57) should be accepted
+    let sv57 = 10u64 << 60 | 0xAAAAA;
+    csrs.write(csr::SATP, sv57);
+    assert_eq!(csrs.read(csr::SATP), sv57);
+
+    // Mode 11 (unsupported) should be ignored — still has Sv57 value
+    let bad_mode = 11u64 << 60 | 0xBBBBB;
     csrs.write(csr::SATP, bad_mode);
-    assert_eq!(csrs.read(csr::SATP), sv48);
+    assert_eq!(csrs.read(csr::SATP), sv57);
 }
 
 #[test]
@@ -1354,6 +1359,110 @@ fn test_sv48_page_walk() {
 }
 
 #[test]
+fn test_sv57_page_walk() {
+    // Set up a simple Sv57 identity mapping: 5-level walk
+    let mut cpu = Cpu::new();
+    let ram_size = 16 * 1024 * 1024u64;
+    let mut bus = Bus::new(ram_size);
+
+    // Build a 5-level page table at physical 0x8010_0000
+    let dram_base = 0x8000_0000u64;
+    let l4_base = 0x8010_0000u64; // Level 4 (root)
+    let l3_base = 0x8010_1000u64; // Level 3
+    let l2_base = 0x8010_2000u64; // Level 2
+    let l1_base = 0x8010_3000u64; // Level 1
+    let l0_base = 0x8010_4000u64; // Level 0
+
+    // Map virtual address 0x0000_0000_0000_2000 → physical 0x8020_0000
+    // VPN[4]=0, VPN[3]=0, VPN[2]=0, VPN[1]=0, VPN[0]=2
+
+    // L4[0] → L3 (pointer PTE)
+    let l3_ppn = l3_base >> 12;
+    bus.write64(l4_base, (l3_ppn << 10) | 0x01); // V=1, pointer
+
+    // L3[0] → L2 (pointer PTE)
+    let l2_ppn = l2_base >> 12;
+    bus.write64(l3_base, (l2_ppn << 10) | 0x01); // V=1, pointer
+
+    // L2[0] → L1 (pointer PTE)
+    let l1_ppn = l1_base >> 12;
+    bus.write64(l2_base, (l1_ppn << 10) | 0x01); // V=1, pointer
+
+    // L1[0] → L0 (pointer PTE)
+    let l0_ppn = l0_base >> 12;
+    bus.write64(l1_base, (l0_ppn << 10) | 0x01); // V=1, pointer
+
+    // L0[2] → leaf at 0x8020_0000 (RWX, A=1, D=1)
+    let target_ppn = 0x8020_0000u64 >> 12;
+    bus.write64(l0_base + 16, (target_ppn << 10) | 0xCF); // V=1, R=1, W=1, X=1, A=1, D=1
+
+    // Set SATP to Sv57 mode (10) with root page table
+    let root_ppn = l4_base >> 12;
+    let satp = (10u64 << 60) | root_ppn;
+    cpu.csrs.write(csr::SATP, satp);
+    cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
+
+    // Translate vaddr 0x2000 → should get 0x8020_0000
+    let result = cpu.mmu.translate(
+        0x2000,
+        microvm::cpu::mmu::AccessType::Read,
+        cpu.mode,
+        &cpu.csrs,
+        &mut bus,
+    );
+    assert_eq!(result, Ok(0x8020_0000));
+
+    // Test write access too
+    let result_w = cpu.mmu.translate(
+        0x2000,
+        microvm::cpu::mmu::AccessType::Write,
+        cpu.mode,
+        &cpu.csrs,
+        &mut bus,
+    );
+    assert_eq!(result_w, Ok(0x8020_0000));
+}
+
+#[test]
+fn test_sv57_2mib_superpage() {
+    // Test Sv57 with a 2 MiB superpage (leaf at level 1)
+    let mut cpu = Cpu::new();
+    let ram_size = 16 * 1024 * 1024u64;
+    let mut bus = Bus::new(ram_size);
+
+    let l4_base = 0x8010_0000u64;
+    let l3_base = 0x8010_1000u64;
+    let l2_base = 0x8010_2000u64;
+    let l1_base = 0x8010_3000u64;
+
+    // VPN[4]=0, VPN[3]=0, VPN[2]=0, VPN[1]=0
+
+    // L4[0] → L3
+    bus.write64(l4_base, ((l3_base >> 12) << 10) | 0x01);
+    // L3[0] → L2
+    bus.write64(l3_base, ((l2_base >> 12) << 10) | 0x01);
+    // L2[0] → L1
+    bus.write64(l2_base, ((l1_base >> 12) << 10) | 0x01);
+    // L1[0] → 2 MiB superpage at 0x8020_0000 (PPN must have lower 9 bits = 0)
+    let target_ppn = 0x8020_0000u64 >> 12; // 0x80200, lower 9 bits = 0x00 ✓
+    bus.write64(l1_base, (target_ppn << 10) | 0xCF); // leaf: V,R,W,X,A,D
+
+    let satp = (10u64 << 60) | (l4_base >> 12);
+    cpu.csrs.write(csr::SATP, satp);
+    cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
+
+    // vaddr 0x0000_0000_0010_0800 → 0x8020_0000 + 0x800 offset within 2M page
+    let result = cpu.mmu.translate(
+        0x800,
+        microvm::cpu::mmu::AccessType::Read,
+        cpu.mode,
+        &cpu.csrs,
+        &mut bus,
+    );
+    assert_eq!(result, Ok(0x8020_0000 + 0x800));
+}
+
+#[test]
 fn test_uart_iir_fifo_bits() {
     let mut uart = microvm::devices::uart::Uart::new();
     // Enable FIFOs
@@ -1424,12 +1533,12 @@ fn test_mstatus_fs_with_fpu() {
 }
 
 #[test]
-fn test_dtb_sv48_mmu_type() {
+fn test_dtb_sv57_mmu_type() {
     let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "console=ttyS0", false, None);
     let dtb_str = String::from_utf8_lossy(&dtb);
     assert!(
-        dtb_str.contains("riscv,sv48"),
-        "DTB should advertise Sv48 MMU type"
+        dtb_str.contains("riscv,sv57"),
+        "DTB should advertise Sv57 MMU type"
     );
 }
 
@@ -3717,7 +3826,7 @@ fn test_dtb_structure_valid_fdt() {
         "DTB should contain ISA string"
     );
     assert!(
-        dtb_str.contains("riscv,sv48"),
+        dtb_str.contains("riscv,sv57"),
         "DTB should contain mmu-type"
     );
     assert!(

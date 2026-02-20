@@ -222,7 +222,8 @@ microvm run --example minimal-kernel
 
 ### v0.3.0 — Linux Boot
 - [x] VirtIO Block/Console/Network/RNG
-- [ ] F/D extensions (floating point)
+- [x] F/D extensions (floating point)
+- [x] Sv57 (5-level page tables)
 - [ ] Boot actual Linux kernel
 
 ### v0.4.0 — Developer Experience

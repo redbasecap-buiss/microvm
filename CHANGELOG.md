@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.32.0 — Sv57 Five-Level Page Tables
+
+### Major Features
+- **Sv57 (5-level) page table support**: The MMU now supports Sv57 translation (SATP mode 10) with 5-level page table walks covering a 57-bit virtual address space (128 PiB). Superpages at all levels (2 MiB, 1 GiB, 512 GiB, 256 TiB) are supported with proper alignment checks.
+- **DTB mmu-type updated to `riscv,sv57`**: The device tree now advertises the highest supported MMU mode, allowing Linux to use Sv57 when configured.
+- **SATP mode 10 accepted**: The CSR file now accepts Sv57 in addition to Bare, Sv39, and Sv48.
+
+### Improvements
+- README roadmap updated: F/D floating-point extensions and Sv57 marked as complete
+- 2 new Sv57 tests: full 5-level page walk and 2 MiB superpage translation
+
+### Stats
+- 189 tests passing (up from 187)
+- MMU: Sv39 (3-level), Sv48 (4-level), Sv57 (5-level) page table translation
+
 ## v0.26.0 — GDB Remote Debug Server
 
 ### Major Features

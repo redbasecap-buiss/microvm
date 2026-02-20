@@ -400,7 +400,7 @@ pub fn generate_dtb(
         "rv64imafdcsu_zicsr_zifencei_zicbom_zicboz_zicbop_zicond_zihintpause_zawrs_zba_zbb_zbs_zbc_sstc_zicntr_svinval",
     );
     b.prop_str("riscv,isa-base", "rv64i");
-    b.prop_str("mmu-type", "riscv,sv48");
+    b.prop_str("mmu-type", "riscv,sv57");
     b.prop_str("status", "okay");
     // ISA extensions as stringlist for newer kernels (Linux 6.2+)
     b.prop_stringlist(
