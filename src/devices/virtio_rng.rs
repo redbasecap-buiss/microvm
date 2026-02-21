@@ -84,8 +84,9 @@ impl VirtioRng {
             0x010 => {
                 // DeviceFeatures — no special features for RNG
                 if self.guest_features_sel == 0 {
-                    // Bit 0 would be VIRTIO_F_RING_INDIRECT_DESC etc; keep it simple
                     0
+                } else if self.guest_features_sel == 1 {
+                    1 // VIRTIO_F_VERSION_1 (bit 32, reported as bit 0 of selector 1)
                 } else {
                     0
                 }
@@ -328,5 +329,16 @@ mod tests {
         assert!(rng.has_interrupt());
         rng.write(0x064, 1); // ACK
         assert!(!rng.has_interrupt());
+    }
+
+    #[test]
+    fn test_virtio_rng_version1_feature() {
+        let mut rng = VirtioRng::new();
+        // Select feature page 0 — no device-specific features
+        rng.write(0x014, 0);
+        assert_eq!(rng.read(0x010), 0);
+        // Select feature page 1 — must report VIRTIO_F_VERSION_1 (bit 0 of page 1 = bit 32)
+        rng.write(0x014, 1);
+        assert_eq!(rng.read(0x010), 1, "VIRTIO_F_VERSION_1 must be set");
     }
 }
