@@ -6,7 +6,9 @@
 #include <sys/mount.h>
 #include <sys/reboot.h>
 #include <sys/mman.h>
+#include <sys/ioctl.h>
 #include <linux/reboot.h>
+#include <termios.h>
 
 /* Direct UART MMIO output — bypasses tty layer for reliable output */
 static volatile unsigned char *uart_base = NULL;
@@ -25,6 +27,12 @@ static void uart_puts(const char *s) {
     }
 }
 
+/* Write via file descriptor (uses kernel tty layer) */
+static void fd_puts(int fd, const char *s) {
+    if (fd >= 0)
+        write(fd, s, strlen(s));
+}
+
 int main(void) {
     mount("proc", "/proc", "proc", 0, NULL);
     mount("sysfs", "/sys", "sysfs", 0, NULL);
@@ -40,21 +48,57 @@ int main(void) {
         close(mem_fd);
     }
 
-    /* Fallback: try /dev/ttyS0 */
-    if (!uart_base) {
-        int fd = open("/dev/ttyS0", O_WRONLY);
-        if (fd >= 0) {
-            dup2(fd, 1);
-            if (fd > 1) close(fd);
-        }
-    }
-
     uart_puts("\n");
     uart_puts("  ========================================\n");
     uart_puts("  |  Linux booted on microvm!            |\n");
     uart_puts("  |  Hello from userspace init!          |\n");
     uart_puts("  ========================================\n");
     uart_puts("\n");
+
+    /* Test 1: tty layer via /dev/console */
+    uart_puts("[test] Testing tty write via /dev/console... ");
+    int con_fd = open("/dev/console", O_WRONLY | O_NOCTTY);
+    if (con_fd >= 0) {
+        const char *msg = "[tty:console] Hello from tty layer!\n";
+        ssize_t n = write(con_fd, msg, strlen(msg));
+        if (n > 0) {
+            uart_puts("OK (wrote via /dev/console)\n");
+        } else {
+            uart_puts("FAIL (write returned <= 0)\n");
+        }
+        close(con_fd);
+    } else {
+        uart_puts("FAIL (open failed)\n");
+    }
+
+    /* Test 2: tty layer via /dev/ttyS0 */
+    uart_puts("[test] Testing tty write via /dev/ttyS0... ");
+    int tty_fd = open("/dev/ttyS0", O_WRONLY | O_NOCTTY);
+    if (tty_fd >= 0) {
+        const char *msg = "[tty:ttyS0] Hello from tty layer!\n";
+        ssize_t n = write(tty_fd, msg, strlen(msg));
+        if (n > 0) {
+            uart_puts("OK (wrote via /dev/ttyS0)\n");
+        } else {
+            uart_puts("FAIL (write returned <= 0)\n");
+        }
+        close(tty_fd);
+    } else {
+        uart_puts("FAIL (open failed)\n");
+    }
+
+    /* Test 3: printf (stdout → console) */
+    uart_puts("[test] Testing printf (stdout)... ");
+    /* Redirect stdout to /dev/console */
+    int std_fd = open("/dev/console", O_WRONLY | O_NOCTTY);
+    if (std_fd >= 0) {
+        dup2(std_fd, STDOUT_FILENO);
+        dup2(std_fd, STDERR_FILENO);
+        close(std_fd);
+    }
+    printf("[printf] Hello from printf!\n");
+    fflush(stdout);
+    uart_puts("(check above for printf output)\n");
 
     FILE *f;
     char buf[256];
@@ -94,6 +138,17 @@ int main(void) {
         uart_puts("[init] Uptime: ");
         if (fgets(buf, sizeof(buf), f))
             uart_puts(buf);
+        fclose(f);
+    }
+
+    /* Show interrupt counts */
+    f = fopen("/proc/interrupts", "r");
+    if (f) {
+        uart_puts("[init] Interrupts:\n");
+        while (fgets(buf, sizeof(buf), f)) {
+            uart_puts("  ");
+            uart_puts(buf);
+        }
         fclose(f);
     }
 

@@ -249,6 +249,12 @@ impl Vm {
                 self.bus.plic.set_pending(12); // VirtIO net IRQ = 12
             }
 
+            // Update Goldfish RTC alarm interrupt
+            self.bus.rtc.tick();
+            if self.bus.rtc.has_interrupt() {
+                self.bus.plic.set_pending(13); // RTC IRQ = 13
+            }
+
             // External interrupts via PLIC → SEIP
             if self.bus.plic.has_interrupt(1) {
                 let mip = self.cpu.csrs.read(csr::MIP);

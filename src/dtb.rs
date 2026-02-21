@@ -481,7 +481,7 @@ pub fn generate_dtb(
     );
     b.prop_u32("#interrupt-cells", 1);
     b.prop_null("interrupt-controller");
-    b.prop_u32_array("interrupts-extended", &[1, 9, 1, 11]);
+    b.prop_u32_array("interrupts-extended", &[1, 11, 1, 9]);
     b.prop_u32("riscv,ndev", 31);
     b.prop_u32("phandle", 2);
     b.end_node();
@@ -499,6 +499,9 @@ pub fn generate_dtb(
         ],
     );
     b.prop_u32("clock-frequency", 3686400);
+    b.prop_u32("reg-shift", 0); // byte-spaced registers
+    b.prop_u32("reg-io-width", 1); // 8-bit I/O
+    b.prop_u32("fifo-size", 16); // 16550A FIFO depth
     b.prop_u32_array("interrupts", &[10]);
     b.prop_u32("interrupt-parent", 2);
     b.end_node();
@@ -610,6 +613,8 @@ pub fn generate_dtb(
             memory::RTC_SIZE as u32,
         ],
     );
+    b.prop_u32_array("interrupts", &[13]); // PLIC IRQ 13
+    b.prop_u32("interrupt-parent", 2);
     b.end_node();
 
     b.end_node(); // soc

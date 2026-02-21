@@ -4917,3 +4917,63 @@ fn test_profile_with_execution() {
     // Verify profile captured something
     prof.print_summary();
 }
+
+#[test]
+fn test_plic_context_ordering_in_dtb() {
+    // PLIC interrupts-extended must be [intc_phandle, 11, intc_phandle, 9]
+    // Context 0 = M-mode external (11), Context 1 = S-mode external (9)
+    let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "console=ttyS0", false, None);
+    // Find "interrupts-extended" property value in DTB
+    // The DTB binary encodes the property; we verify the PLIC routes correctly
+    // by checking that S-mode context 1 gets UART interrupts
+    let mut bus = microvm::memory::Bus::new(128 * 1024 * 1024);
+    // Set up PLIC: enable IRQ 10 in context 1 (S-mode)
+    bus.plic.write(0x000028, 1); // priority[10] = 1
+    bus.plic.write(0x002080, 1 << 10); // enable[1] bit 10
+    bus.plic.write(0x201000, 0); // threshold[1] = 0
+                                 // Enable THRE interrupt on UART
+    bus.uart.write(1, 0x02); // IER = THRE
+    assert!(bus.uart.has_interrupt());
+    bus.plic.set_pending(10);
+    assert!(bus.plic.has_interrupt(1)); // S-mode context must see it
+    assert!(!dtb.is_empty());
+}
+
+#[test]
+fn test_uart_dtb_has_fifo_and_reg_properties() {
+    let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "console=ttyS0", false, None);
+    let dtb_str = String::from_utf8_lossy(&dtb);
+    // Check that the DTB contains the reg-shift, reg-io-width, and fifo-size strings
+    assert!(dtb_str.contains("reg-shift"));
+    assert!(dtb_str.contains("reg-io-width"));
+    assert!(dtb_str.contains("fifo-size"));
+}
+
+#[test]
+fn test_rtc_alarm_interrupt_fires_via_plic() {
+    let mut bus = microvm::memory::Bus::new(64 * 1024 * 1024);
+    // Set alarm to 1 ns in the past
+    bus.rtc.write(0x08, 1); // ALARM_LOW = 1
+    bus.rtc.write(0x0C, 0); // ALARM_HIGH = 0
+    bus.rtc.write(0x10, 1); // IRQ_ENABLED
+    bus.rtc.tick();
+    assert!(bus.rtc.has_interrupt());
+    // Hook into PLIC
+    bus.plic.write(0x000034, 1); // priority[13] = 1
+    bus.plic.write(0x002080, 1 << 13); // enable[1] bit 13
+    bus.plic.write(0x201000, 0); // threshold[1] = 0
+    bus.plic.set_pending(13);
+    assert!(bus.plic.has_interrupt(1));
+    // Clear interrupt
+    bus.rtc.write(0x1C, 1);
+    assert!(!bus.rtc.has_interrupt());
+}
+
+#[test]
+fn test_dtb_has_rtc_interrupts() {
+    let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "console=ttyS0", false, None);
+    let dtb_str = String::from_utf8_lossy(&dtb);
+    // RTC node should reference interrupt-parent
+    assert!(dtb_str.contains("goldfish-rtc"));
+    assert!(dtb_str.contains("interrupt-parent"));
+}

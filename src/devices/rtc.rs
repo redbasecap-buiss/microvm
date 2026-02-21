@@ -4,25 +4,41 @@
 /// Linux has built-in support for "google,goldfish-rtc".
 ///
 /// Register map (all 32-bit reads):
-///   0x00  TIME_LOW   — low 32 bits of nanoseconds since epoch
-///   0x04  TIME_HIGH  — high 32 bits of nanoseconds since epoch
-///   0x08  ALARM_LOW  — alarm low (write-only, not implemented)
-///   0x0C  ALARM_HIGH — alarm high (write-only, not implemented)
-///   0x10  IRQ_ENABLED — alarm IRQ enable (not implemented)
-///   0x14  CLEAR_ALARM — clear alarm (not implemented)
-///   0x18  ALARM_STATUS — alarm status (reads 0)
-///   0x1C  CLEAR_INTERRUPT — clear interrupt (not implemented)
+///   0x00  TIME_LOW        — low 32 bits of nanoseconds since epoch
+///   0x04  TIME_HIGH       — high 32 bits of nanoseconds since epoch
+///   0x08  ALARM_LOW       — alarm low (ns)
+///   0x0C  ALARM_HIGH      — alarm high (ns)
+///   0x10  IRQ_ENABLED     — alarm IRQ enable (1=enabled)
+///   0x14  CLEAR_ALARM     — clear alarm (write any value)
+///   0x18  ALARM_STATUS    — alarm status (1=alarm fired)
+///   0x1C  CLEAR_INTERRUPT — clear interrupt (write any value)
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Default)]
 pub struct GoldfishRtc {
     /// Cached time in nanoseconds (updated on TIME_LOW read, latched for TIME_HIGH)
     latched_ns: u64,
+    /// Alarm target time in nanoseconds
+    alarm_ns: u64,
+    /// Whether alarm IRQ is enabled
+    irq_enabled: bool,
+    /// Whether alarm has fired (pending interrupt)
+    alarm_fired: bool,
+}
+
+impl Default for GoldfishRtc {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GoldfishRtc {
     pub fn new() -> Self {
-        Self { latched_ns: 0 }
+        Self {
+            latched_ns: 0,
+            alarm_ns: 0,
+            irq_enabled: false,
+            alarm_fired: false,
+        }
     }
 
     fn now_ns() -> u64 {
@@ -30,6 +46,21 @@ impl GoldfishRtc {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos() as u64
+    }
+
+    /// Check if RTC has a pending interrupt (alarm fired and IRQ enabled).
+    pub fn has_interrupt(&self) -> bool {
+        self.irq_enabled && self.alarm_fired
+    }
+
+    /// Tick: check if alarm has fired (call from VM loop).
+    pub fn tick(&mut self) {
+        if self.irq_enabled && !self.alarm_fired && self.alarm_ns > 0 {
+            let now = Self::now_ns();
+            if now >= self.alarm_ns {
+                self.alarm_fired = true;
+            }
+        }
     }
 
     /// Read a 32-bit register at the given offset.
@@ -45,23 +76,53 @@ impl GoldfishRtc {
                 // TIME_HIGH — return upper 32 bits of latched time
                 (self.latched_ns >> 32) as u32
             }
+            0x08 => {
+                // ALARM_LOW
+                self.alarm_ns as u32
+            }
+            0x0C => {
+                // ALARM_HIGH
+                (self.alarm_ns >> 32) as u32
+            }
+            0x10 => {
+                // IRQ_ENABLED
+                self.irq_enabled as u32
+            }
             0x18 => {
-                // ALARM_STATUS — no alarm support
-                0
+                // ALARM_STATUS
+                self.alarm_fired as u32
             }
             _ => 0,
         }
     }
 
-    /// Write a 32-bit register (alarm registers — accepted but ignored).
-    pub fn write(&mut self, _offset: u64, _val: u64) {
-        // Alarm functionality not implemented — writes are silently ignored
-    }
-
-    /// RTC does not generate interrupts (alarm not implemented).
-    #[allow(dead_code)]
-    pub fn has_interrupt(&self) -> bool {
-        false
+    /// Write a 32-bit register.
+    pub fn write(&mut self, offset: u64, val: u64) {
+        let val32 = val as u32;
+        match offset {
+            0x08 => {
+                // ALARM_LOW
+                self.alarm_ns = (self.alarm_ns & 0xFFFF_FFFF_0000_0000) | val32 as u64;
+            }
+            0x0C => {
+                // ALARM_HIGH
+                self.alarm_ns = (self.alarm_ns & 0x0000_0000_FFFF_FFFF) | ((val32 as u64) << 32);
+            }
+            0x10 => {
+                // IRQ_ENABLED
+                self.irq_enabled = val32 != 0;
+            }
+            0x14 => {
+                // CLEAR_ALARM
+                self.alarm_ns = 0;
+                self.alarm_fired = false;
+            }
+            0x1C => {
+                // CLEAR_INTERRUPT
+                self.alarm_fired = false;
+            }
+            _ => {}
+        }
     }
 }
 
@@ -99,17 +160,72 @@ mod tests {
     }
 
     #[test]
-    fn test_rtc_write_ignored() {
+    fn test_rtc_write_alarm() {
         let mut rtc = GoldfishRtc::new();
-        rtc.write(0x08, 12345); // ALARM_LOW
-        rtc.write(0x0C, 67890); // ALARM_HIGH
-                                // Should not panic or change behavior
-        assert_eq!(rtc.read(0x18), 0);
+        rtc.write(0x08, 0xDEADBEEF); // ALARM_LOW
+        rtc.write(0x0C, 0x12345678); // ALARM_HIGH
+        assert_eq!(rtc.read(0x08), 0xDEADBEEF);
+        assert_eq!(rtc.read(0x0C), 0x12345678);
+        assert_eq!(rtc.alarm_ns, 0x12345678_DEADBEEF);
     }
 
     #[test]
-    fn test_rtc_no_interrupt() {
+    fn test_rtc_no_interrupt_by_default() {
         let rtc = GoldfishRtc::new();
         assert!(!rtc.has_interrupt());
+    }
+
+    #[test]
+    fn test_rtc_alarm_fires() {
+        let mut rtc = GoldfishRtc::new();
+        // Set alarm to 1 ns (already in the past)
+        rtc.write(0x08, 1); // ALARM_LOW = 1
+        rtc.write(0x0C, 0); // ALARM_HIGH = 0
+        rtc.write(0x10, 1); // IRQ_ENABLED = true
+        assert!(!rtc.has_interrupt());
+        rtc.tick();
+        assert!(rtc.has_interrupt());
+        assert_eq!(rtc.read(0x18), 1); // ALARM_STATUS = fired
+    }
+
+    #[test]
+    fn test_rtc_clear_interrupt() {
+        let mut rtc = GoldfishRtc::new();
+        rtc.write(0x08, 1);
+        rtc.write(0x10, 1);
+        rtc.tick();
+        assert!(rtc.has_interrupt());
+        rtc.write(0x1C, 1); // CLEAR_INTERRUPT
+        assert!(!rtc.has_interrupt());
+    }
+
+    #[test]
+    fn test_rtc_clear_alarm() {
+        let mut rtc = GoldfishRtc::new();
+        rtc.write(0x08, 1);
+        rtc.write(0x10, 1);
+        rtc.tick();
+        assert!(rtc.has_interrupt());
+        rtc.write(0x14, 1); // CLEAR_ALARM
+        assert!(!rtc.has_interrupt());
+        assert_eq!(rtc.alarm_ns, 0);
+    }
+
+    #[test]
+    fn test_rtc_irq_disabled_no_fire() {
+        let mut rtc = GoldfishRtc::new();
+        rtc.write(0x08, 1); // alarm in the past
+                            // IRQ not enabled
+        rtc.tick();
+        assert!(!rtc.has_interrupt());
+        assert!(!rtc.alarm_fired); // tick doesn't fire if irq disabled
+    }
+
+    #[test]
+    fn test_rtc_irq_enable_read() {
+        let mut rtc = GoldfishRtc::new();
+        assert_eq!(rtc.read(0x10), 0);
+        rtc.write(0x10, 1);
+        assert_eq!(rtc.read(0x10), 1);
     }
 }
