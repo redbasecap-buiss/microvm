@@ -933,6 +933,31 @@ fn op_system(cpu: &mut Cpu, bus: &mut Bus, inst: &Instruction, len: u64) -> bool
         }
     }
 
+    // Zimop: May-Be-Operations (funct3 = 4)
+    if inst.funct3 == 4 {
+        let f7 = inst.funct7;
+        let rs2_field = (inst.raw >> 20) & 0x1F;
+        // MOP.R.n:  funct7 pattern 1_n4_00_n3n2_0, rs2[4:2]=111
+        // MOP.RR.n: funct7 pattern 1_n2_00_n1n0_1
+        let is_mop_r = (f7 & 0x59) == 0x40 && (rs2_field & 0x1C) == 0x1C;
+        let is_mop_rr = (f7 & 0x59) == 0x41;
+        if is_mop_r || is_mop_rr {
+            // MOP: write zero to rd
+            cpu.regs[inst.rd] = 0;
+            cpu.regs[0] = 0;
+            cpu.pc += len;
+            return true;
+        }
+        // Unknown funct3=4 SYSTEM instruction
+        log::warn!(
+            "Unknown SYSTEM funct3=4 instruction: {:#010x} at PC={:#x}",
+            inst.raw,
+            cpu.pc
+        );
+        cpu.handle_exception(2, inst.raw as u64, bus);
+        return true;
+    }
+
     // CSR instructions
     let csr_addr = (inst.raw >> 20) & 0xFFF;
     let csr_addr = csr_addr as u16;

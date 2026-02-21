@@ -561,6 +561,24 @@ fn disasm_system(raw: u32, rd: usize, rs1: usize, funct3: u32) -> String {
         };
     }
 
+    // Zimop: May-Be-Operations (funct3 = 4)
+    if funct3 == 4 {
+        let f7 = (raw >> 25) & 0x7F;
+        let rs2_field = (raw >> 20) & 0x1F;
+        let is_mop_r = (f7 & 0x59) == 0x40 && (rs2_field & 0x1C) == 0x1C;
+        let is_mop_rr = (f7 & 0x59) == 0x41;
+        if is_mop_r {
+            let n = ((f7 >> 5) & 1) << 4 | ((f7 >> 1) & 3) << 2 | (rs2_field & 3);
+            return format!("mop.r.{}  {}, {}", n, r(rd), r(rs1));
+        }
+        if is_mop_rr {
+            let n = ((f7 >> 5) & 1) << 2 | ((f7 >> 1) & 3);
+            let rs2 = rs2_field as usize;
+            return format!("mop.rr.{} {}, {}, {}", n, r(rd), r(rs1), r(rs2));
+        }
+        return format!("system  {:#010x}", raw);
+    }
+
     let csr_addr = ((raw >> 20) & 0xFFF) as u16;
     let name = csr_name(csr_addr);
     let csr_str = if name.is_empty() {
@@ -800,6 +818,7 @@ pub fn mnemonic(inst: u32) -> &'static str {
             5 => "csrrwi",
             6 => "csrrsi",
             7 => "csrrci",
+            4 => "mop",
             _ => "csr?",
         },
         0x07 => "fload",

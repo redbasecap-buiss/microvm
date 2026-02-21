@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.46.0 — Zimop & Zcmop Extensions (May-Be-Operations)
+
+### Major Features
+- **Zimop extension**: 40 may-be-operations (MOPs) for forward-compatible instruction encoding
+  - `MOP.R.n` (n=0..31): 32 single-source MOPs — write zero to rd, reserving encoding space for future extensions to read rs1
+  - `MOP.RR.n` (n=0..7): 8 two-source MOPs — write zero to rd, reserving encoding space for future extensions to read rs1 and rs2
+  - Encoded in SYSTEM major opcode (0x73) with funct3=4
+  - Critical for control-flow integrity (CFI) — programs with landing pads/shadow stacks can run on implementations without the corresponding extension
+- **Zcmop extension**: 8 compressed 16-bit MOP instructions
+  - `C.MOP.n` for n=1,3,5,7,9,11,13,15 — encoded in C.LUI reserved space (nzimm=0, odd rd)
+  - Expand to NOP; future extensions may redefine them to read x[n]
+- **Disassembler updated**: Recognizes `mop.r.N` and `mop.rr.N` mnemonics with correct N decoding from scattered bit fields
+- **DTB updated**: ISA string and `riscv,isa-extensions` now advertise `zimop` and `zcmop`
+
+### New Tests
+- `test_mop_r_0_writes_zero`: MOP.R.0 writes 0 to rd, preserves rs1
+- `test_mop_r_31_writes_zero`: MOP.R.31 (maximum N) writes 0 to rd
+- `test_mop_rr_0_writes_zero`: MOP.RR.0 writes 0 to rd, preserves rs1 and rs2
+- `test_mop_rr_7_writes_zero`: MOP.RR.7 (maximum N) writes 0 to rd
+- `test_mop_r_rd_x0_nop`: MOP.R with rd=x0 — x0 stays 0, PC advances
+- `test_c_mop_1_expands_to_nop`: C.MOP.1 expands to NOP
+- `test_c_mop_7_expands_to_nop`: C.MOP.7 expands to NOP
+- `test_c_mop_15_expands_to_nop`: C.MOP.15 expands to NOP
+- `test_c_mop_all_variants`: All 8 C.MOP instructions expand correctly
+- `test_dtb_advertises_zimop_zcmop`: DTB extension advertisement
+
+### Stats
+- 267 integration tests, all passing
+- 0 clippy warnings
+
 ## v0.44.0 — Zacas & Zabha Extensions (Atomic CAS + Byte/Halfword Atomics)
 
 ### Major Features

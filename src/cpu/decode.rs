@@ -97,7 +97,14 @@ pub fn expand_compressed(inst: u32) -> u32 {
                 if rd == 2 {
                     expand_c_addi16sp(inst)
                 } else {
-                    expand_c_lui(inst)
+                    // Zcmop: C.MOP.n — C.LUI with nzimm=0 and odd rd
+                    let nzimm = ((inst >> 12) & 0x1) | ((inst >> 2) & 0x1F);
+                    if nzimm == 0 && (rd & 1) == 1 {
+                        // C.MOP.n: expand to NOP (ADDI x0, x0, 0)
+                        0x00000013
+                    } else {
+                        expand_c_lui(inst)
+                    }
                 }
             }
             4 => expand_c_alu(inst),

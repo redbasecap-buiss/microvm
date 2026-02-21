@@ -5641,3 +5641,143 @@ fn test_dtb_advertises_zfa() {
     let dts = dtb::dtb_to_dts(&dtb_data);
     assert!(dts.contains("zfa"), "DTB should advertise zfa extension");
 }
+
+// ===== Zimop: May-Be-Operations =====
+
+#[test]
+fn test_mop_r_0_writes_zero() {
+    // MOP.R.0: n=0 → n[4:0]=00000
+    // funct7 = 1_0_00_00_0 = 0x40, rs2 = 111_00 = 0x1C
+    // Encoding: funct7=0x40, rs2=0x1C, rs1=a0, funct3=4, rd=a1, opcode=0x73
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    let mut bus = Bus::new(64 * 1024);
+    let inst = (0x40u32 << 25) | (0x1C << 20) | (10 << 15) | (4 << 12) | (11 << 7) | 0x73;
+    bus.write32(DRAM_BASE, inst);
+    cpu.reset(DRAM_BASE);
+    cpu.regs[10] = 0xDEAD;
+    cpu.regs[11] = 0xBEEF;
+    cpu.step(&mut bus);
+    assert_eq!(cpu.regs[11], 0, "MOP.R.0 should write 0 to rd");
+    assert_eq!(cpu.regs[10], 0xDEAD, "MOP.R.0 should not modify rs1");
+}
+
+#[test]
+fn test_mop_r_31_writes_zero() {
+    // MOP.R.31: n=31 → n[4]=1, n[3:2]=11, n[1:0]=11
+    // funct7 = 1_1_00_11_0 = 0x66, rs2 = 111_11 = 0x1F
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    let mut bus = Bus::new(64 * 1024);
+    let inst = (0x66u32 << 25) | (0x1F << 20) | (5 << 15) | (4 << 12) | (6 << 7) | 0x73;
+    bus.write32(DRAM_BASE, inst);
+    cpu.reset(DRAM_BASE);
+    cpu.regs[6] = 42;
+    cpu.step(&mut bus);
+    assert_eq!(cpu.regs[6], 0, "MOP.R.31 should write 0 to rd");
+}
+
+#[test]
+fn test_mop_rr_0_writes_zero() {
+    // MOP.RR.0: n=0 → n[2]=0, n[1:0]=00
+    // funct7 = 1_0_00_00_1 = 0x41, rs2=a2, rs1=a0, rd=a1
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    let mut bus = Bus::new(64 * 1024);
+    let inst = (0x41u32 << 25) | (12 << 20) | (10 << 15) | (4 << 12) | (11 << 7) | 0x73;
+    bus.write32(DRAM_BASE, inst);
+    cpu.reset(DRAM_BASE);
+    cpu.regs[10] = 100;
+    cpu.regs[11] = 200;
+    cpu.regs[12] = 300;
+    cpu.step(&mut bus);
+    assert_eq!(cpu.regs[11], 0, "MOP.RR.0 should write 0 to rd");
+    assert_eq!(cpu.regs[10], 100, "MOP.RR.0 should not modify rs1");
+    assert_eq!(cpu.regs[12], 300, "MOP.RR.0 should not modify rs2");
+}
+
+#[test]
+fn test_mop_rr_7_writes_zero() {
+    // MOP.RR.7: n=7 → n[2]=1, n[1:0]=11
+    // funct7 = 1_1_00_11_1 = 0x67
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    let mut bus = Bus::new(64 * 1024);
+    let inst = (0x67u32 << 25) | (3 << 20) | (4 << 15) | (4 << 12) | (5 << 7) | 0x73;
+    bus.write32(DRAM_BASE, inst);
+    cpu.reset(DRAM_BASE);
+    cpu.regs[5] = 999;
+    cpu.step(&mut bus);
+    assert_eq!(cpu.regs[5], 0, "MOP.RR.7 should write 0 to rd");
+}
+
+#[test]
+fn test_mop_r_rd_x0_nop() {
+    // MOP.R.0 with rd=x0 — should be fine (writes 0 to x0 which is always 0)
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    let mut bus = Bus::new(64 * 1024);
+    let inst = (0x40u32 << 25) | (0x1C << 20) | (10 << 15) | (4 << 12) | (0 << 7) | 0x73;
+    bus.write32(DRAM_BASE, inst);
+    cpu.reset(DRAM_BASE);
+    cpu.step(&mut bus);
+    assert_eq!(cpu.regs[0], 0, "x0 remains 0");
+    assert_eq!(cpu.pc, DRAM_BASE + 4, "PC advances by 4");
+}
+
+// ===== Zcmop: Compressed May-Be-Operations =====
+
+#[test]
+fn test_c_mop_1_expands_to_nop() {
+    // C.MOP.1: 0110_0_001_0_00000_01 = 0x6081
+    let expanded = expand_compressed(0x6081);
+    assert_eq!(expanded, 0x00000013, "C.MOP.1 should expand to NOP");
+}
+
+#[test]
+fn test_c_mop_7_expands_to_nop() {
+    // C.MOP.7: rd=7=00111 → 011_0_00111_00000_01 = 0x6381
+    let expanded = expand_compressed(0x6381);
+    assert_eq!(expanded, 0x00000013, "C.MOP.7 should expand to NOP");
+}
+
+#[test]
+fn test_c_mop_15_expands_to_nop() {
+    // C.MOP.15: rd=15=01111 → 011_0_01111_00000_01 = 0x6781
+    let expanded = expand_compressed(0x6781);
+    assert_eq!(expanded, 0x00000013, "C.MOP.15 should expand to NOP");
+}
+
+#[test]
+fn test_c_mop_all_variants() {
+    // All C.MOP.n for n = 1,3,5,7,9,11,13,15
+    let encodings: [(u32, u32); 8] = [
+        (1, 0x6081),  // C.MOP.1:  rd=1
+        (3, 0x6181),  // C.MOP.3:  rd=3
+        (5, 0x6281),  // C.MOP.5:  rd=5
+        (7, 0x6381),  // C.MOP.7:  rd=7
+        (9, 0x6481),  // C.MOP.9:  rd=9
+        (11, 0x6581), // C.MOP.11: rd=11
+        (13, 0x6681), // C.MOP.13: rd=13
+        (15, 0x6781), // C.MOP.15: rd=15
+    ];
+    for (n, enc) in &encodings {
+        let expanded = expand_compressed(*enc);
+        assert_eq!(expanded, 0x00000013, "C.MOP.{} should expand to NOP", n);
+    }
+}
+
+#[test]
+fn test_dtb_advertises_zimop_zcmop() {
+    use microvm::dtb;
+    let dtb_data = dtb::generate_dtb(128 * 1024 * 1024, "console=ttyS0", false, None);
+    let dts = dtb::dtb_to_dts(&dtb_data);
+    assert!(
+        dts.contains("zimop"),
+        "DTB should advertise zimop extension"
+    );
+    assert!(
+        dts.contains("zcmop"),
+        "DTB should advertise zcmop extension"
+    );
+}
