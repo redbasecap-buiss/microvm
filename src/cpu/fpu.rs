@@ -343,60 +343,101 @@ fn exec_fp_op(cpu: &mut Cpu, bus: &mut Bus, raw: u32, len: u64) {
             cpu.fregs[rd] = nan_box(result);
         }
         0x14 => {
-            // FMIN.S / FMAX.S
+            // FMIN.S / FMAX.S / FMINM.S (Zfa) / FMAXM.S (Zfa)
             cpu.csrs.set_fs_dirty();
             let a = unbox_f32(cpu.fregs[rs1]);
             let b = unbox_f32(cpu.fregs[rs2]);
-            let r = if a.is_nan() && b.is_nan() {
-                set_flags(cpu, NV);
-                f32::from_bits(0x7FC0_0000) // canonical NaN
-            } else if a.is_nan() {
-                if is_snan_f32(a) {
-                    set_flags(cpu, NV);
-                }
-                b
-            } else if b.is_nan() {
-                if is_snan_f32(b) {
-                    set_flags(cpu, NV);
-                }
-                a
-            } else {
-                match rm {
-                    0 => {
-                        // FMIN
-                        if a == 0.0 && b == 0.0 {
-                            if a.is_sign_negative() {
-                                a
-                            } else {
-                                b
-                            }
-                        } else if a < b {
+            let r = match rm {
+                2 => {
+                    // FMINM.S (Zfa) — IEEE 754-2019 minimum: NaN if either is NaN
+                    if a.is_nan() || b.is_nan() {
+                        if is_snan_f32(a) || is_snan_f32(b) {
+                            set_flags(cpu, NV);
+                        }
+                        f32::from_bits(0x7FC0_0000)
+                    } else if a == 0.0 && b == 0.0 {
+                        if a.is_sign_negative() {
                             a
                         } else {
                             b
                         }
+                    } else if a < b {
+                        a
+                    } else {
+                        b
                     }
-                    1 => {
-                        // FMAX
-                        if a == 0.0 && b == 0.0 {
-                            if a.is_sign_positive() {
-                                a
-                            } else {
-                                b
-                            }
-                        } else if a > b {
+                }
+                3 => {
+                    // FMAXM.S (Zfa) — IEEE 754-2019 maximum: NaN if either is NaN
+                    if a.is_nan() || b.is_nan() {
+                        if is_snan_f32(a) || is_snan_f32(b) {
+                            set_flags(cpu, NV);
+                        }
+                        f32::from_bits(0x7FC0_0000)
+                    } else if a == 0.0 && b == 0.0 {
+                        if a.is_sign_positive() {
                             a
                         } else {
                             b
                         }
+                    } else if a > b {
+                        a
+                    } else {
+                        b
                     }
-                    _ => a,
+                }
+                _ => {
+                    // FMIN.S (rm=0) / FMAX.S (rm=1)
+                    if a.is_nan() && b.is_nan() {
+                        set_flags(cpu, NV);
+                        f32::from_bits(0x7FC0_0000)
+                    } else if a.is_nan() {
+                        if is_snan_f32(a) {
+                            set_flags(cpu, NV);
+                        }
+                        b
+                    } else if b.is_nan() {
+                        if is_snan_f32(b) {
+                            set_flags(cpu, NV);
+                        }
+                        a
+                    } else {
+                        match rm {
+                            0 => {
+                                if a == 0.0 && b == 0.0 {
+                                    if a.is_sign_negative() {
+                                        a
+                                    } else {
+                                        b
+                                    }
+                                } else if a < b {
+                                    a
+                                } else {
+                                    b
+                                }
+                            }
+                            1 => {
+                                if a == 0.0 && b == 0.0 {
+                                    if a.is_sign_positive() {
+                                        a
+                                    } else {
+                                        b
+                                    }
+                                } else if a > b {
+                                    a
+                                } else {
+                                    b
+                                }
+                            }
+                            _ => a,
+                        }
+                    }
                 }
             };
             cpu.fregs[rd] = nan_box(r.to_bits());
         }
         0x50 => {
-            // FLE.S / FLT.S / FEQ.S (result goes to integer rd)
+            // FLE.S / FLT.S / FEQ.S / FLEQ.S (Zfa) / FLTQ.S (Zfa)
             let a = unbox_f32(cpu.fregs[rs1]);
             let b = unbox_f32(cpu.fregs[rs2]);
             let result = match rm {
@@ -427,6 +468,28 @@ fn exec_fp_op(cpu: &mut Cpu, bus: &mut Bus, raw: u32, len: u64) {
                         0u64
                     } else {
                         (a == b) as u64
+                    }
+                }
+                4 => {
+                    // FLEQ.S (Zfa) — quiet: only sNaN raises NV
+                    if is_snan_f32(a) || is_snan_f32(b) {
+                        set_flags(cpu, NV);
+                    }
+                    if a.is_nan() || b.is_nan() {
+                        0u64
+                    } else {
+                        (a <= b) as u64
+                    }
+                }
+                5 => {
+                    // FLTQ.S (Zfa) — quiet: only sNaN raises NV
+                    if is_snan_f32(a) || is_snan_f32(b) {
+                        set_flags(cpu, NV);
+                    }
+                    if a.is_nan() || b.is_nan() {
+                        0u64
+                    } else {
+                        (a < b) as u64
                     }
                 }
                 _ => 0u64,
@@ -483,9 +546,14 @@ fn exec_fp_op(cpu: &mut Cpu, bus: &mut Bus, raw: u32, len: u64) {
             }
         }
         0x78 => {
-            // FMV.W.X (move integer bits to fp reg)
             cpu.csrs.set_fs_dirty();
-            cpu.fregs[rd] = nan_box(cpu.regs[rs1] as u32);
+            if rs2 == 1 {
+                // FLI.S (Zfa) — load immediate single-precision constant
+                cpu.fregs[rd] = nan_box(fli_s_table(rs1));
+            } else {
+                // FMV.W.X (move integer bits to fp reg)
+                cpu.fregs[rd] = nan_box(cpu.regs[rs1] as u32);
+            }
         }
 
         // === Double-precision (D) ===
@@ -556,58 +624,100 @@ fn exec_fp_op(cpu: &mut Cpu, bus: &mut Bus, raw: u32, len: u64) {
             cpu.fregs[rd] = result;
         }
         0x15 => {
-            // FMIN.D / FMAX.D
+            // FMIN.D / FMAX.D / FMINM.D (Zfa) / FMAXM.D (Zfa)
             cpu.csrs.set_fs_dirty();
             let a = to_f64(cpu.fregs[rs1]);
             let b = to_f64(cpu.fregs[rs2]);
-            let r = if a.is_nan() && b.is_nan() {
-                set_flags(cpu, NV);
-                f64::from_bits(0x7FF8_0000_0000_0000) // canonical NaN
-            } else if a.is_nan() {
-                if is_snan_f64(a) {
-                    set_flags(cpu, NV);
-                }
-                b
-            } else if b.is_nan() {
-                if is_snan_f64(b) {
-                    set_flags(cpu, NV);
-                }
-                a
-            } else {
-                match rm {
-                    0 => {
-                        if a == 0.0 && b == 0.0 {
-                            if a.is_sign_negative() {
-                                a
-                            } else {
-                                b
-                            }
-                        } else if a < b {
+            let r = match rm {
+                2 => {
+                    // FMINM.D (Zfa)
+                    if a.is_nan() || b.is_nan() {
+                        if is_snan_f64(a) || is_snan_f64(b) {
+                            set_flags(cpu, NV);
+                        }
+                        f64::from_bits(0x7FF8_0000_0000_0000)
+                    } else if a == 0.0 && b == 0.0 {
+                        if a.is_sign_negative() {
                             a
                         } else {
                             b
                         }
+                    } else if a < b {
+                        a
+                    } else {
+                        b
                     }
-                    1 => {
-                        if a == 0.0 && b == 0.0 {
-                            if a.is_sign_positive() {
-                                a
-                            } else {
-                                b
-                            }
-                        } else if a > b {
+                }
+                3 => {
+                    // FMAXM.D (Zfa)
+                    if a.is_nan() || b.is_nan() {
+                        if is_snan_f64(a) || is_snan_f64(b) {
+                            set_flags(cpu, NV);
+                        }
+                        f64::from_bits(0x7FF8_0000_0000_0000)
+                    } else if a == 0.0 && b == 0.0 {
+                        if a.is_sign_positive() {
                             a
                         } else {
                             b
                         }
+                    } else if a > b {
+                        a
+                    } else {
+                        b
                     }
-                    _ => a,
+                }
+                _ => {
+                    if a.is_nan() && b.is_nan() {
+                        set_flags(cpu, NV);
+                        f64::from_bits(0x7FF8_0000_0000_0000)
+                    } else if a.is_nan() {
+                        if is_snan_f64(a) {
+                            set_flags(cpu, NV);
+                        }
+                        b
+                    } else if b.is_nan() {
+                        if is_snan_f64(b) {
+                            set_flags(cpu, NV);
+                        }
+                        a
+                    } else {
+                        match rm {
+                            0 => {
+                                if a == 0.0 && b == 0.0 {
+                                    if a.is_sign_negative() {
+                                        a
+                                    } else {
+                                        b
+                                    }
+                                } else if a < b {
+                                    a
+                                } else {
+                                    b
+                                }
+                            }
+                            1 => {
+                                if a == 0.0 && b == 0.0 {
+                                    if a.is_sign_positive() {
+                                        a
+                                    } else {
+                                        b
+                                    }
+                                } else if a > b {
+                                    a
+                                } else {
+                                    b
+                                }
+                            }
+                            _ => a,
+                        }
+                    }
                 }
             };
             cpu.fregs[rd] = r.to_bits();
         }
         0x51 => {
-            // FLE.D / FLT.D / FEQ.D
+            // FLE.D / FLT.D / FEQ.D / FLEQ.D (Zfa) / FLTQ.D (Zfa)
             let a = to_f64(cpu.fregs[rs1]);
             let b = to_f64(cpu.fregs[rs2]);
             let result = match rm {
@@ -637,6 +747,28 @@ fn exec_fp_op(cpu: &mut Cpu, bus: &mut Bus, raw: u32, len: u64) {
                         (a == b) as u64
                     }
                 }
+                4 => {
+                    // FLEQ.D (Zfa) — quiet
+                    if is_snan_f64(a) || is_snan_f64(b) {
+                        set_flags(cpu, NV);
+                    }
+                    if a.is_nan() || b.is_nan() {
+                        0u64
+                    } else {
+                        (a <= b) as u64
+                    }
+                }
+                5 => {
+                    // FLTQ.D (Zfa) — quiet
+                    if is_snan_f64(a) || is_snan_f64(b) {
+                        set_flags(cpu, NV);
+                    }
+                    if a.is_nan() || b.is_nan() {
+                        0u64
+                    } else {
+                        (a < b) as u64
+                    }
+                }
                 _ => 0u64,
             };
             cpu.regs[rd] = result;
@@ -644,13 +776,17 @@ fn exec_fp_op(cpu: &mut Cpu, bus: &mut Bus, raw: u32, len: u64) {
             return;
         }
         0x61 => {
-            // FCVT.W.D / FCVT.WU.D / FCVT.L.D / FCVT.LU.D
+            // FCVT.W.D / FCVT.WU.D / FCVT.L.D / FCVT.LU.D / FCVTMOD.W.D (Zfa)
             let a = to_f64(cpu.fregs[rs1]);
             let result = match rs2 {
                 0 => fcvt_to_i32(cpu, a) as u64,
                 1 => fcvt_to_u32(cpu, a) as u64,
                 2 => fcvt_to_i64(cpu, a),
                 3 => fcvt_to_u64(cpu, a),
+                8 => {
+                    // FCVTMOD.W.D (Zfa) — modular convert, always RTZ
+                    fcvtmod_w_d(cpu, a)
+                }
                 _ => 0,
             };
             cpu.regs[rd] = result;
@@ -691,25 +827,66 @@ fn exec_fp_op(cpu: &mut Cpu, bus: &mut Bus, raw: u32, len: u64) {
             }
         }
         0x79 => {
-            // FMV.D.X
             cpu.csrs.set_fs_dirty();
-            cpu.fregs[rd] = cpu.regs[rs1];
+            if rs2 == 1 {
+                // FLI.D (Zfa) — load immediate double-precision constant
+                cpu.fregs[rd] = fli_d_table(rs1);
+            } else {
+                // FMV.D.X
+                cpu.fregs[rd] = cpu.regs[rs1];
+            }
         }
         // Conversions between S and D
         0x20 => {
-            // FCVT.S.D
-            cpu.csrs.set_fs_dirty();
-            let d = to_f64(cpu.fregs[rs1]);
-            let s = d as f32;
-            cpu.fregs[rd] = nan_box(s.to_bits());
-            accumulate_f32_flags(cpu, s);
+            match rs2 {
+                4 => {
+                    // FROUND.S (Zfa) — round to integer, result as float
+                    cpu.csrs.set_fs_dirty();
+                    let a = unbox_f32(cpu.fregs[rs1]);
+                    let r = fround_f32(cpu, a, rm, false);
+                    cpu.fregs[rd] = nan_box(r.to_bits());
+                }
+                5 => {
+                    // FROUNDNX.S (Zfa) — round to integer, set inexact
+                    cpu.csrs.set_fs_dirty();
+                    let a = unbox_f32(cpu.fregs[rs1]);
+                    let r = fround_f32(cpu, a, rm, true);
+                    cpu.fregs[rd] = nan_box(r.to_bits());
+                }
+                _ => {
+                    // FCVT.S.D (rs2=1)
+                    cpu.csrs.set_fs_dirty();
+                    let d = to_f64(cpu.fregs[rs1]);
+                    let s = d as f32;
+                    cpu.fregs[rd] = nan_box(s.to_bits());
+                    accumulate_f32_flags(cpu, s);
+                }
+            }
         }
         0x21 => {
-            // FCVT.D.S
-            cpu.csrs.set_fs_dirty();
-            let s = unbox_f32(cpu.fregs[rs1]);
-            let d = s as f64;
-            cpu.fregs[rd] = d.to_bits();
+            match rs2 {
+                4 => {
+                    // FROUND.D (Zfa) — round to integer, result as double
+                    cpu.csrs.set_fs_dirty();
+                    let a = to_f64(cpu.fregs[rs1]);
+                    let r = fround_f64(cpu, a, rm, false);
+                    cpu.fregs[rd] = r.to_bits();
+                }
+                5 => {
+                    // FROUNDNX.D (Zfa) — round to integer, set inexact
+                    cpu.csrs.set_fs_dirty();
+                    let a = to_f64(cpu.fregs[rs1]);
+                    let r = fround_f64(cpu, a, rm, true);
+                    cpu.fregs[rd] = r.to_bits();
+                }
+                _ => {
+                    // FCVT.D.S (rs2=0)
+                    cpu.csrs.set_fs_dirty();
+                    let s = unbox_f32(cpu.fregs[rs1]);
+                    let d = s as f64;
+                    cpu.fregs[rd] = d.to_bits();
+                }
+            }
         }
         _ => {
             log::warn!("Unknown FP op funct7={:#x} at PC={:#x}", funct7, cpu.pc);
@@ -908,4 +1085,193 @@ fn fcvt_to_u64(cpu: &mut Cpu, f: f64) -> u64 {
         return 0;
     }
     f as u64
+}
+
+// =====================================================================
+// Zfa extension helpers
+// =====================================================================
+
+/// FLI.S constant table — 32 single-precision values indexed by rs1
+fn fli_s_table(idx: usize) -> u32 {
+    const TABLE: [u32; 32] = [
+        0xBF80_0000, // 0: -1.0
+        0x0080_0000, // 1: minimum positive normal
+        0x3780_0000, // 2: 2^-16
+        0x3800_0000, // 3: 2^-15
+        0x3B80_0000, // 4: 2^-8
+        0x3C00_0000, // 5: 2^-7
+        0x3D80_0000, // 6: 2^-4 (0.0625)
+        0x3E00_0000, // 7: 2^-3 (0.125)
+        0x3E80_0000, // 8: 0.25
+        0x3EA0_0000, // 9: 0.3125
+        0x3EC0_0000, // 10: 0.375
+        0x3EE0_0000, // 11: 0.4375
+        0x3F00_0000, // 12: 0.5
+        0x3F20_0000, // 13: 0.625
+        0x3F40_0000, // 14: 0.75
+        0x3F60_0000, // 15: 0.875
+        0x3F80_0000, // 16: 1.0
+        0x3FA0_0000, // 17: 1.25
+        0x3FC0_0000, // 18: 1.5
+        0x3FE0_0000, // 19: 1.75
+        0x4000_0000, // 20: 2.0
+        0x4020_0000, // 21: 2.5
+        0x4040_0000, // 22: 3.0
+        0x4080_0000, // 23: 4.0
+        0x4100_0000, // 24: 8.0
+        0x4180_0000, // 25: 16.0
+        0x4300_0000, // 26: 128.0 (2^7)
+        0x4380_0000, // 27: 256.0 (2^8)
+        0x4700_0000, // 28: 2^15
+        0x4780_0000, // 29: 2^16
+        0x7F80_0000, // 30: +inf
+        0x7FC0_0000, // 31: canonical NaN
+    ];
+    TABLE[idx & 0x1F]
+}
+
+/// FLI.D constant table — 32 double-precision values indexed by rs1
+fn fli_d_table(idx: usize) -> u64 {
+    const TABLE: [u64; 32] = [
+        0xBFF0_0000_0000_0000, // 0: -1.0
+        0x0010_0000_0000_0000, // 1: minimum positive normal (double)
+        0x3EF0_0000_0000_0000, // 2: 2^-16
+        0x3F00_0000_0000_0000, // 3: 2^-15
+        0x3F70_0000_0000_0000, // 4: 2^-8
+        0x3F80_0000_0000_0000, // 5: 2^-7
+        0x3FB0_0000_0000_0000, // 6: 2^-4 (0.0625)
+        0x3FC0_0000_0000_0000, // 7: 2^-3 (0.125)
+        0x3FD0_0000_0000_0000, // 8: 0.25
+        0x3FD4_0000_0000_0000, // 9: 0.3125
+        0x3FD8_0000_0000_0000, // 10: 0.375
+        0x3FDC_0000_0000_0000, // 11: 0.4375
+        0x3FE0_0000_0000_0000, // 12: 0.5
+        0x3FE4_0000_0000_0000, // 13: 0.625
+        0x3FE8_0000_0000_0000, // 14: 0.75
+        0x3FEC_0000_0000_0000, // 15: 0.875
+        0x3FF0_0000_0000_0000, // 16: 1.0
+        0x3FF4_0000_0000_0000, // 17: 1.25
+        0x3FF8_0000_0000_0000, // 18: 1.5
+        0x3FFC_0000_0000_0000, // 19: 1.75
+        0x4000_0000_0000_0000, // 20: 2.0
+        0x4004_0000_0000_0000, // 21: 2.5
+        0x4008_0000_0000_0000, // 22: 3.0
+        0x4010_0000_0000_0000, // 23: 4.0
+        0x4020_0000_0000_0000, // 24: 8.0
+        0x4030_0000_0000_0000, // 25: 16.0
+        0x4060_0000_0000_0000, // 26: 128.0 (2^7)
+        0x4070_0000_0000_0000, // 27: 256.0 (2^8)
+        0x40E0_0000_0000_0000, // 28: 2^15
+        0x40F0_0000_0000_0000, // 29: 2^16
+        0x7FF0_0000_0000_0000, // 30: +inf
+        0x7FF8_0000_0000_0000, // 31: canonical NaN
+    ];
+    TABLE[idx & 0x1F]
+}
+
+/// Resolve rounding mode: if rm==7 (dynamic), use FRM CSR
+fn resolve_rm(cpu: &Cpu, rm: u32) -> u32 {
+    if rm == 7 {
+        cpu.csrs.read(super::csr::FRM) as u32 & 0x7
+    } else {
+        rm
+    }
+}
+
+/// FROUND.S / FROUNDNX.S helper
+fn fround_f32(cpu: &mut Cpu, a: f32, rm: u32, set_inexact: bool) -> f32 {
+    if a.is_nan() {
+        if is_snan_f32(a) {
+            set_flags(cpu, NV);
+        }
+        return f32::from_bits(0x7FC0_0000); // canonical NaN
+    }
+    if a.is_infinite() || a == 0.0 {
+        return a;
+    }
+    let mode = resolve_rm(cpu, rm);
+    let rounded = round_f64_to_int(a as f64, mode);
+    let result = rounded as f32;
+    if set_inexact && result != a {
+        set_flags(cpu, NX);
+    }
+    result
+}
+
+/// FROUND.D / FROUNDNX.D helper
+fn fround_f64(cpu: &mut Cpu, a: f64, rm: u32, set_inexact: bool) -> f64 {
+    if a.is_nan() {
+        if is_snan_f64(a) {
+            set_flags(cpu, NV);
+        }
+        return f64::from_bits(0x7FF8_0000_0000_0000);
+    }
+    if a.is_infinite() || a == 0.0 {
+        return a;
+    }
+    let mode = resolve_rm(cpu, rm);
+    let result = round_f64_to_int(a, mode);
+    if set_inexact && result != a {
+        set_flags(cpu, NX);
+    }
+    result
+}
+
+/// Round f64 to integer using specified rounding mode
+fn round_f64_to_int(val: f64, mode: u32) -> f64 {
+    match mode {
+        0 => {
+            // RNE — round to nearest, ties to even
+            let r = val.round();
+            // Check for tie: if exactly halfway, round to even
+            let frac = (val - val.floor()).abs();
+            if (frac - 0.5).abs() < f64::EPSILON {
+                let floored = val.floor();
+                let ceiled = val.ceil();
+                if (floored as i64) % 2 == 0 {
+                    floored
+                } else {
+                    ceiled
+                }
+            } else {
+                r
+            }
+        }
+        1 => {
+            // RTZ — round towards zero
+            val.trunc()
+        }
+        2 => {
+            // RDN — round down (towards -inf)
+            val.floor()
+        }
+        3 => {
+            // RUP — round up (towards +inf)
+            val.ceil()
+        }
+        4 => {
+            // RMM — round to nearest, ties to max magnitude
+            val.round()
+        }
+        _ => val.round(),
+    }
+}
+
+/// FCVTMOD.W.D (Zfa) — modular convert double to i32, always RTZ
+fn fcvtmod_w_d(cpu: &mut Cpu, f: f64) -> u64 {
+    if f.is_nan() || f.is_infinite() {
+        set_flags(cpu, NV);
+        return 0u64;
+    }
+    // Truncate to integer, then take low 32 bits, sign-extend
+    let truncated = f.trunc();
+    if truncated != f {
+        set_flags(cpu, NX);
+    }
+    // Convert to large integer, take low 32 bits
+    // For very large values, we need modular arithmetic
+    let as_i128 = truncated as i128;
+    let low32 = (as_i128 & 0xFFFF_FFFF) as u32;
+    // Sign-extend to 64 bits
+    low32 as i32 as i64 as u64
 }

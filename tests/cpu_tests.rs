@@ -5442,3 +5442,202 @@ fn test_dtb_advertises_zacas_zabha() {
         "DTB should advertise zabha extension"
     );
 }
+
+// =====================================================================
+// Zfa extension tests
+// =====================================================================
+
+#[test]
+fn test_zfa_fli_s() {
+    // FLI.S fd, imm — funct7=0x78, rs2=1, rs1=index, rm=000, rd=fd, opcode=0x53
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    let mut bus = Bus::new(64 * 1024);
+
+    // Load constant index 16 (1.0) into f1
+    // funct7=0x78, rs2=1, rs1=16, rm=000, rd=1
+    let fli_s = (0x78u32 << 25) | (1 << 20) | (16 << 15) | (0 << 12) | (1 << 7) | 0x53;
+    bus.write32(DRAM_BASE, fli_s);
+    cpu.reset(DRAM_BASE);
+    cpu.step(&mut bus);
+    let val = f32::from_bits(cpu.fregs[1] as u32);
+    assert_eq!(val, 1.0, "FLI.S index 16 should load 1.0");
+
+    // Load constant index 0 (-1.0) into f2
+    let fli_s_neg = (0x78u32 << 25) | (1 << 20) | (0 << 15) | (0 << 12) | (2 << 7) | 0x53;
+    bus.write32(DRAM_BASE + 4, fli_s_neg);
+    cpu.step(&mut bus);
+    let val2 = f32::from_bits(cpu.fregs[2] as u32);
+    assert_eq!(val2, -1.0, "FLI.S index 0 should load -1.0");
+
+    // Load constant index 30 (+inf)
+    let fli_s_inf = (0x78u32 << 25) | (1 << 20) | (30 << 15) | (0 << 12) | (3 << 7) | 0x53;
+    bus.write32(DRAM_BASE + 8, fli_s_inf);
+    cpu.step(&mut bus);
+    let val3 = f32::from_bits(cpu.fregs[3] as u32);
+    assert!(
+        val3.is_infinite() && val3.is_sign_positive(),
+        "FLI.S index 30 should load +inf"
+    );
+}
+
+#[test]
+fn test_zfa_fli_d() {
+    // FLI.D fd, imm — funct7=0x79, rs2=1, rs1=index, rm=000, rd=fd, opcode=0x53
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    let mut bus = Bus::new(64 * 1024);
+
+    let fli_d = (0x79u32 << 25) | (1 << 20) | (20 << 15) | (0 << 12) | (1 << 7) | 0x53;
+    bus.write32(DRAM_BASE, fli_d);
+    cpu.reset(DRAM_BASE);
+    cpu.step(&mut bus);
+    let val = f64::from_bits(cpu.fregs[1]);
+    assert_eq!(val, 2.0, "FLI.D index 20 should load 2.0");
+}
+
+#[test]
+fn test_zfa_fminm_s() {
+    // FMINM.S: funct7=0x14, rm=2 (bit 13 set)
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    let mut bus = Bus::new(64 * 1024);
+
+    let fminm_s = (0x14u32 << 25) | (3 << 20) | (2 << 15) | (2 << 12) | (1 << 7) | 0x53;
+    bus.write32(DRAM_BASE, fminm_s);
+    cpu.reset(DRAM_BASE);
+    // Test with NaN: FMINM returns NaN if either input is NaN
+    cpu.fregs[2] = 0xFFFFFFFF_7FC00000u64; // NaN
+    cpu.fregs[3] = 0xFFFFFFFF_3F800000u64; // 1.0
+    cpu.step(&mut bus);
+    let val = f32::from_bits(cpu.fregs[1] as u32);
+    assert!(val.is_nan(), "FMINM.S: NaN input should produce NaN result");
+}
+
+#[test]
+fn test_zfa_fmaxm_d() {
+    // FMAXM.D: funct7=0x15, rm=3
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    let mut bus = Bus::new(64 * 1024);
+
+    let fmaxm_d = (0x15u32 << 25) | (3 << 20) | (2 << 15) | (3 << 12) | (1 << 7) | 0x53;
+    bus.write32(DRAM_BASE, fmaxm_d);
+    cpu.reset(DRAM_BASE);
+    cpu.fregs[2] = f64::NAN.to_bits();
+    cpu.fregs[3] = 42.0f64.to_bits();
+    cpu.step(&mut bus);
+    let val = f64::from_bits(cpu.fregs[1]);
+    assert!(val.is_nan(), "FMAXM.D: NaN input should produce NaN");
+}
+
+#[test]
+fn test_zfa_fleq_s() {
+    // FLEQ.S: funct7=0x50, rm=4 — quiet LE comparison
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    let mut bus = Bus::new(64 * 1024);
+
+    let fleq_s = (0x50u32 << 25) | (3 << 20) | (2 << 15) | (4 << 12) | (10 << 7) | 0x53;
+    bus.write32(DRAM_BASE, fleq_s);
+    bus.write32(DRAM_BASE + 4, fleq_s);
+    cpu.reset(DRAM_BASE);
+    cpu.fregs[2] = 0xFFFFFFFF_3F800000u64; // 1.0
+    cpu.fregs[3] = 0xFFFFFFFF_40000000u64; // 2.0
+    cpu.step(&mut bus);
+    assert_eq!(cpu.regs[10], 1, "FLEQ.S: 1.0 <= 2.0 should be true");
+
+    // With quiet NaN: should return 0 without NV flag (unless sNaN)
+    cpu.fregs[2] = 0xFFFFFFFF_7FC00000u64; // qNaN
+    cpu.step(&mut bus);
+    assert_eq!(cpu.regs[10], 0, "FLEQ.S: qNaN <= 2.0 should be false");
+}
+
+#[test]
+fn test_zfa_fltq_d() {
+    // FLTQ.D: funct7=0x51, rm=5 — quiet LT comparison
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    let mut bus = Bus::new(64 * 1024);
+
+    let fltq_d = (0x51u32 << 25) | (3 << 20) | (2 << 15) | (5 << 12) | (10 << 7) | 0x53;
+    bus.write32(DRAM_BASE, fltq_d);
+    cpu.reset(DRAM_BASE);
+    cpu.fregs[2] = 3.0f64.to_bits();
+    cpu.fregs[3] = 5.0f64.to_bits();
+    cpu.step(&mut bus);
+    assert_eq!(cpu.regs[10], 1, "FLTQ.D: 3.0 < 5.0 should be true");
+}
+
+#[test]
+fn test_zfa_fround_s() {
+    // FROUND.S: funct7=0x20, rs2=4, rm=1 (RTZ)
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    let mut bus = Bus::new(64 * 1024);
+
+    let fround_s = (0x20u32 << 25) | (4 << 20) | (2 << 15) | (1 << 12) | (1 << 7) | 0x53;
+    bus.write32(DRAM_BASE, fround_s);
+    cpu.reset(DRAM_BASE);
+    cpu.fregs[2] = 0xFFFFFFFF_40500000u64; // 3.25f
+    cpu.step(&mut bus);
+    let val = f32::from_bits(cpu.fregs[1] as u32);
+    assert_eq!(val, 3.0, "FROUND.S RTZ: 3.25 should round to 3.0");
+}
+
+#[test]
+fn test_zfa_froundnx_d() {
+    // FROUNDNX.D: funct7=0x21, rs2=5, rm=1 (RTZ)
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    let mut bus = Bus::new(64 * 1024);
+
+    let froundnx_d = (0x21u32 << 25) | (5 << 20) | (2 << 15) | (1 << 12) | (1 << 7) | 0x53;
+    bus.write32(DRAM_BASE, froundnx_d);
+    cpu.reset(DRAM_BASE);
+    cpu.fregs[2] = 2.7f64.to_bits();
+    cpu.step(&mut bus);
+    let val = f64::from_bits(cpu.fregs[1]);
+    assert_eq!(val, 2.0, "FROUNDNX.D RTZ: 2.7 should round to 2.0");
+    // Should have inexact flag set
+    let fcsr = cpu.csrs.read(0x003); // FCSR
+    assert_ne!(fcsr & 1, 0, "FROUNDNX.D should set inexact flag");
+}
+
+#[test]
+fn test_zfa_fcvtmod_w_d() {
+    // FCVTMOD.W.D: funct7=0x61, rs2=8, rm=1 (RTZ)
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    let mut bus = Bus::new(64 * 1024);
+
+    let fcvtmod = (0x61u32 << 25) | (8 << 20) | (2 << 15) | (1 << 12) | (10 << 7) | 0x53;
+    bus.write32(DRAM_BASE, fcvtmod);
+    cpu.reset(DRAM_BASE);
+    cpu.fregs[2] = (-7.9f64).to_bits();
+    cpu.step(&mut bus);
+    assert_eq!(cpu.regs[10] as i64, -7, "FCVTMOD.W.D: -7.9 truncates to -7");
+}
+
+#[test]
+fn test_zfa_fcvtmod_w_d_nan() {
+    // FCVTMOD.W.D with NaN → 0
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    let mut bus = Bus::new(64 * 1024);
+
+    let fcvtmod = (0x61u32 << 25) | (8 << 20) | (2 << 15) | (1 << 12) | (10 << 7) | 0x53;
+    bus.write32(DRAM_BASE, fcvtmod);
+    cpu.reset(DRAM_BASE);
+    cpu.fregs[2] = f64::NAN.to_bits();
+    cpu.step(&mut bus);
+    assert_eq!(cpu.regs[10], 0, "FCVTMOD.W.D: NaN converts to 0");
+}
+
+#[test]
+fn test_dtb_advertises_zfa() {
+    use microvm::dtb;
+    let dtb_data = dtb::generate_dtb(128 * 1024 * 1024, "console=ttyS0", false, None);
+    let dts = dtb::dtb_to_dts(&dtb_data);
+    assert!(dts.contains("zfa"), "DTB should advertise zfa extension");
+}

@@ -436,13 +436,21 @@ fn disasm_fp(raw: u32, rd: usize, rs1: usize, rs2: usize, funct7: u32) -> String
         }
         5 => {
             let rm = (raw >> 12) & 7;
-            if rm == 0 {
-                format!("fmin{}  {}, {}, {}", fmt, f(rd), f(rs1), f(rs2))
-            } else {
-                format!("fmax{}  {}, {}, {}", fmt, f(rd), f(rs1), f(rs2))
+            match rm {
+                0 => format!("fmin{}  {}, {}, {}", fmt, f(rd), f(rs1), f(rs2)),
+                1 => format!("fmax{}  {}, {}, {}", fmt, f(rd), f(rs1), f(rs2)),
+                2 => format!("fminm{} {}, {}, {}", fmt, f(rd), f(rs1), f(rs2)),
+                3 => format!("fmaxm{} {}, {}, {}", fmt, f(rd), f(rs1), f(rs2)),
+                _ => format!("fminmax?{}", fmt),
             }
         }
-        0x18 => format!("fcvt.w{} {}, {}", fmt, r(rd), f(rs1)),
+        0x18 => {
+            if rs2 == 8 {
+                format!("fcvtmod.w.d {}, {}, rtz", r(rd), f(rs1))
+            } else {
+                format!("fcvt.w{} {}, {}", fmt, r(rd), f(rs1))
+            }
+        }
         0x1A => format!("fcvt{}.w {}, {}", fmt, f(rd), r(rs1)),
         0x1C => {
             let rm = (raw >> 12) & 7;
@@ -457,29 +465,40 @@ fn disasm_fp(raw: u32, rd: usize, rs1: usize, rs2: usize, funct7: u32) -> String
                 format!("fclass{} {}, {}", fmt, r(rd), f(rs1))
             }
         }
-        0x1E => format!(
-            "fmv{}.x {}, {}",
-            if funct7 & 3 == 1 { ".d" } else { ".w" },
-            f(rd),
-            r(rs1)
-        ),
+        0x1E => {
+            if rs2 == 1 {
+                format!("fli{}   {}, {}", fmt, f(rd), rs1)
+            } else {
+                format!(
+                    "fmv{}.x {}, {}",
+                    if funct7 & 3 == 1 { ".d" } else { ".w" },
+                    f(rd),
+                    r(rs1)
+                )
+            }
+        }
         0x14 => {
             let rm = (raw >> 12) & 7;
             match rm {
                 0 => format!("fle{}   {}, {}, {}", fmt, r(rd), f(rs1), f(rs2)),
                 1 => format!("flt{}   {}, {}, {}", fmt, r(rd), f(rs1), f(rs2)),
                 2 => format!("feq{}   {}, {}, {}", fmt, r(rd), f(rs1), f(rs2)),
+                4 => format!("fleq{}  {}, {}, {}", fmt, r(rd), f(rs1), f(rs2)),
+                5 => format!("fltq{}  {}, {}, {}", fmt, r(rd), f(rs1), f(rs2)),
                 _ => format!("fcmp?{}", fmt),
             }
         }
-        8 => {
-            // fcvt.d.s / fcvt.s.d
-            if funct7 & 3 == 1 {
-                format!("fcvt.d.s {}, {}", f(rd), f(rs1))
-            } else {
-                format!("fcvt.s.d {}, {}", f(rd), f(rs1))
+        8 => match rs2 {
+            4 => format!("fround{} {}, {}", fmt, f(rd), f(rs1)),
+            5 => format!("froundnx{} {}, {}", fmt, f(rd), f(rs1)),
+            _ => {
+                if funct7 & 3 == 1 {
+                    format!("fcvt.d.s {}, {}", f(rd), f(rs1))
+                } else {
+                    format!("fcvt.s.d {}, {}", f(rd), f(rs1))
+                }
             }
-        }
+        },
         _ => format!("fp?     {:#010x}", raw),
     }
 }
