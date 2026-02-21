@@ -869,6 +869,8 @@ pub fn mnemonic(inst: u32) -> &'static str {
         0x57 => {
             if funct3 == 7 {
                 "vsetcfg"
+            } else if funct3 == 1 || funct3 == 5 {
+                "vfpu"
             } else {
                 "valu"
             }

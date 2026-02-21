@@ -6468,3 +6468,668 @@ fn test_dtb_advertises_v() {
     assert!(dts.contains("zvl128b"), "DTB should advertise zvl128b");
     assert!(dts.contains("zve64d"), "DTB should advertise zve64d");
 }
+
+// ============== Vector FP Extension Tests ==============
+
+/// Helper: encode OPFVV instruction (funct3=1)
+fn opfvv(funct6: u32, vd: u32, vs1: u32, vs2: u32, vm: u32) -> u32 {
+    ((funct6 & 0x3F) << 26)
+        | ((vm & 1) << 25)
+        | ((vs2 & 0x1F) << 20)
+        | ((vs1 & 0x1F) << 15)
+        | (1 << 12)
+        | ((vd & 0x1F) << 7)
+        | 0x57
+}
+
+/// Helper: encode OPFVF instruction (funct3=5)
+fn opfvf(funct6: u32, vd: u32, rs1: u32, vs2: u32, vm: u32) -> u32 {
+    ((funct6 & 0x3F) << 26)
+        | ((vm & 1) << 25)
+        | ((vs2 & 0x1F) << 20)
+        | ((rs1 & 0x1F) << 15)
+        | (5 << 12)
+        | ((vd & 0x1F) << 7)
+        | 0x57
+}
+
+/// Run program with pre-set fregs
+fn run_program_with_fregs(
+    instructions: &[u32],
+    steps: usize,
+    regs: &[(usize, u64)],
+    fregs: &[(usize, u64)],
+) -> (Cpu, Bus) {
+    let mut bus = Bus::new(64 * 1024);
+    let bytes: Vec<u8> = instructions
+        .iter()
+        .flat_map(|i: &u32| i.to_le_bytes())
+        .collect();
+    bus.load_binary(&bytes, 0);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+    for &(reg, val) in regs {
+        cpu.regs[reg] = val;
+    }
+    for &(reg, val) in fregs {
+        cpu.fregs[reg] = val;
+    }
+    for _ in 0..steps {
+        if !cpu.step(&mut bus) {
+            break;
+        }
+    }
+    (cpu, bus)
+}
+
+#[test]
+fn test_vfadd_vv_f32() {
+    // Set up v2=[1.0, 2.0, 3.0, 4.0], v1=[10.0, 20.0, 30.0, 40.0]
+    // vfadd.vv v3, v2, v1 → v3=[11.0, 22.0, 33.0, 44.0]
+    let mut bus = Bus::new(64 * 1024);
+    let prog = [
+        v_addi(1, 0, 4),              // x1 = 4
+        vsetvli(2, 1, 0b0_0_010_000), // e32, m1
+        opfvv(0b000000, 3, 1, 2, 1),  // vfadd.vv v3, v2, v1
+    ];
+    let bytes: Vec<u8> = prog.iter().flat_map(|i| i.to_le_bytes()).collect();
+    bus.load_binary(&bytes, 0);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    // Pre-load v2 with [1.0, 2.0, 3.0, 4.0] f32
+    for (i, val) in [1.0f32, 2.0, 3.0, 4.0].iter().enumerate() {
+        cpu.vregs.write_elem(2, 32, i, val.to_bits() as u64);
+    }
+    // Pre-load v1 with [10.0, 20.0, 30.0, 40.0] f32
+    for (i, val) in [10.0f32, 20.0, 30.0, 40.0].iter().enumerate() {
+        cpu.vregs.write_elem(1, 32, i, val.to_bits() as u64);
+    }
+
+    for _ in 0..3 {
+        cpu.step(&mut bus);
+    }
+
+    for (i, expected) in [11.0f32, 22.0, 33.0, 44.0].iter().enumerate() {
+        let got = f32::from_bits(cpu.vregs.read_elem(3, 32, i) as u32);
+        assert_eq!(got, *expected, "vfadd.vv elem {i}");
+    }
+}
+
+#[test]
+fn test_vfmul_vv_f32() {
+    let mut bus = Bus::new(64 * 1024);
+    let prog = [
+        v_addi(1, 0, 4),
+        vsetvli(2, 1, 0b0_0_010_000),
+        opfvv(0b001000, 3, 1, 2, 1), // vfmul.vv v3, v2, v1
+    ];
+    let bytes: Vec<u8> = prog.iter().flat_map(|i| i.to_le_bytes()).collect();
+    bus.load_binary(&bytes, 0);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    for (i, val) in [2.0f32, 3.0, 4.0, 5.0].iter().enumerate() {
+        cpu.vregs.write_elem(2, 32, i, val.to_bits() as u64);
+    }
+    for (i, val) in [10.0f32, 10.0, 10.0, 10.0].iter().enumerate() {
+        cpu.vregs.write_elem(1, 32, i, val.to_bits() as u64);
+    }
+
+    for _ in 0..3 {
+        cpu.step(&mut bus);
+    }
+
+    for (i, expected) in [20.0f32, 30.0, 40.0, 50.0].iter().enumerate() {
+        let got = f32::from_bits(cpu.vregs.read_elem(3, 32, i) as u32);
+        assert_eq!(got, *expected, "vfmul.vv elem {i}");
+    }
+}
+
+#[test]
+fn test_vfadd_vf_f32() {
+    // vfadd.vf v3, v2, f1  → v3[i] = v2[i] + f1
+    let mut bus = Bus::new(64 * 1024);
+    let prog = [
+        v_addi(1, 0, 4),
+        vsetvli(2, 1, 0b0_0_010_000),
+        opfvf(0b000000, 3, 1, 2, 1), // vfadd.vf v3, v2, f1
+    ];
+    let bytes: Vec<u8> = prog.iter().flat_map(|i| i.to_le_bytes()).collect();
+    bus.load_binary(&bytes, 0);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    for (i, val) in [1.0f32, 2.0, 3.0, 4.0].iter().enumerate() {
+        cpu.vregs.write_elem(2, 32, i, val.to_bits() as u64);
+    }
+    cpu.fregs[1] = 0xFFFFFFFF_00000000u64 | (100.0f32.to_bits() as u64); // NaN-boxed
+
+    for _ in 0..3 {
+        cpu.step(&mut bus);
+    }
+
+    for (i, expected) in [101.0f32, 102.0, 103.0, 104.0].iter().enumerate() {
+        let got = f32::from_bits(cpu.vregs.read_elem(3, 32, i) as u32);
+        assert_eq!(got, *expected, "vfadd.vf elem {i}");
+    }
+}
+
+#[test]
+fn test_vfmacc_vv_f32() {
+    // vfmacc.vv v3, v1, v2 → v3[i] = v2[i] * v1[i] + v3[i]
+    let mut bus = Bus::new(64 * 1024);
+    let prog = [
+        v_addi(1, 0, 4),
+        vsetvli(2, 1, 0b0_0_010_000),
+        opfvv(0b101100, 3, 1, 2, 1), // vfmacc.vv v3, v1, v2
+    ];
+    let bytes: Vec<u8> = prog.iter().flat_map(|i| i.to_le_bytes()).collect();
+    bus.load_binary(&bytes, 0);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    for (i, val) in [2.0f32, 3.0, 4.0, 5.0].iter().enumerate() {
+        cpu.vregs.write_elem(2, 32, i, val.to_bits() as u64);
+    }
+    for (i, val) in [10.0f32, 10.0, 10.0, 10.0].iter().enumerate() {
+        cpu.vregs.write_elem(1, 32, i, val.to_bits() as u64);
+    }
+    // v3 = [1.0, 1.0, 1.0, 1.0] (accumulator)
+    for i in 0..4 {
+        cpu.vregs.write_elem(3, 32, i, 1.0f32.to_bits() as u64);
+    }
+
+    for _ in 0..3 {
+        cpu.step(&mut bus);
+    }
+
+    // v3[i] = v2[i]*v1[i] + v3_old[i] = [21.0, 31.0, 41.0, 51.0]
+    for (i, expected) in [21.0f32, 31.0, 41.0, 51.0].iter().enumerate() {
+        let got = f32::from_bits(cpu.vregs.read_elem(3, 32, i) as u32);
+        assert_eq!(got, *expected, "vfmacc.vv elem {i}");
+    }
+}
+
+#[test]
+fn test_vmfeq_vv_f32() {
+    // vmfeq.vv v0, v2, v1 → mask bits
+    let mut bus = Bus::new(64 * 1024);
+    let prog = [
+        v_addi(1, 0, 4),
+        vsetvli(2, 1, 0b0_0_010_000),
+        opfvv(0b011000, 0, 1, 2, 1), // vmfeq.vv v0, v2, v1
+    ];
+    let bytes: Vec<u8> = prog.iter().flat_map(|i| i.to_le_bytes()).collect();
+    bus.load_binary(&bytes, 0);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    // v2 = [1.0, 2.0, 3.0, 4.0], v1 = [1.0, 99.0, 3.0, 99.0]
+    for (i, val) in [1.0f32, 2.0, 3.0, 4.0].iter().enumerate() {
+        cpu.vregs.write_elem(2, 32, i, val.to_bits() as u64);
+    }
+    for (i, val) in [1.0f32, 99.0, 3.0, 99.0].iter().enumerate() {
+        cpu.vregs.write_elem(1, 32, i, val.to_bits() as u64);
+    }
+    cpu.vregs.data[0] = [0; 16]; // clear mask
+
+    for _ in 0..3 {
+        cpu.step(&mut bus);
+    }
+
+    // Elements 0 and 2 are equal → mask bits 0,2 set → 0b0101 = 5
+    assert_eq!(cpu.vregs.data[0][0] & 0xF, 0b0101, "vmfeq mask");
+}
+
+#[test]
+fn test_vfredosum_f32() {
+    // vfredosum.vs v3, v2, v1 → v3[0] = v1[0] + sum(v2)
+    let mut bus = Bus::new(64 * 1024);
+    let prog = [
+        v_addi(1, 0, 4),
+        vsetvli(2, 1, 0b0_0_010_000),
+        opfvv(0b000011, 3, 1, 2, 1), // vfredosum v3, v2, v1
+    ];
+    let bytes: Vec<u8> = prog.iter().flat_map(|i| i.to_le_bytes()).collect();
+    bus.load_binary(&bytes, 0);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    for (i, val) in [1.0f32, 2.0, 3.0, 4.0].iter().enumerate() {
+        cpu.vregs.write_elem(2, 32, i, val.to_bits() as u64);
+    }
+    cpu.vregs.write_elem(1, 32, 0, 100.0f32.to_bits() as u64); // initial acc
+
+    for _ in 0..3 {
+        cpu.step(&mut bus);
+    }
+
+    let got = f32::from_bits(cpu.vregs.read_elem(3, 32, 0) as u32);
+    assert_eq!(got, 110.0, "vfredosum: 100 + 1+2+3+4 = 110");
+}
+
+#[test]
+fn test_vfsqrt_f32() {
+    // vfsqrt.v v3, v2 (funct6=0b010010, vs1=0b00000)
+    let mut bus = Bus::new(64 * 1024);
+    let prog = [
+        v_addi(1, 0, 4),
+        vsetvli(2, 1, 0b0_0_010_000),
+        opfvv(0b010010, 3, 0b00000, 2, 1), // vfsqrt.v v3, v2
+    ];
+    let bytes: Vec<u8> = prog.iter().flat_map(|i| i.to_le_bytes()).collect();
+    bus.load_binary(&bytes, 0);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    for (i, val) in [4.0f32, 9.0, 16.0, 25.0].iter().enumerate() {
+        cpu.vregs.write_elem(2, 32, i, val.to_bits() as u64);
+    }
+
+    for _ in 0..3 {
+        cpu.step(&mut bus);
+    }
+
+    for (i, expected) in [2.0f32, 3.0, 4.0, 5.0].iter().enumerate() {
+        let got = f32::from_bits(cpu.vregs.read_elem(3, 32, i) as u32);
+        assert_eq!(got, *expected, "vfsqrt elem {i}");
+    }
+}
+
+#[test]
+fn test_vfcvt_f_x_f32() {
+    // vfcvt.f.x.v v3, v2 (funct6=0b010010, vs1=0b10011)
+    let mut bus = Bus::new(64 * 1024);
+    let prog = [
+        v_addi(1, 0, 4),
+        vsetvli(2, 1, 0b0_0_010_000),
+        opfvv(0b010010, 3, 0b10011, 2, 1), // vfcvt.f.x.v v3, v2
+    ];
+    let bytes: Vec<u8> = prog.iter().flat_map(|i| i.to_le_bytes()).collect();
+    bus.load_binary(&bytes, 0);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    // Store signed integers as SEW=32 elements
+    for (i, val) in [42i32, -7, 0, 100].iter().enumerate() {
+        cpu.vregs.write_elem(2, 32, i, *val as u32 as u64);
+    }
+
+    for _ in 0..3 {
+        cpu.step(&mut bus);
+    }
+
+    for (i, expected) in [42.0f32, -7.0, 0.0, 100.0].iter().enumerate() {
+        let got = f32::from_bits(cpu.vregs.read_elem(3, 32, i) as u32);
+        assert_eq!(got, *expected, "vfcvt.f.x elem {i}");
+    }
+}
+
+#[test]
+fn test_vfmv_v_f() {
+    // vfmv.v.f v3, f1 (funct6=0b010111, vm=1)
+    let mut bus = Bus::new(64 * 1024);
+    let prog = [
+        v_addi(1, 0, 4),
+        vsetvli(2, 1, 0b0_0_010_000),
+        opfvf(0b010111, 3, 1, 0, 1), // vfmv.v.f v3, f1
+    ];
+    let bytes: Vec<u8> = prog.iter().flat_map(|i| i.to_le_bytes()).collect();
+    bus.load_binary(&bytes, 0);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    cpu.fregs[1] = 0xFFFFFFFF_00000000u64 | (42.5f32.to_bits() as u64);
+
+    for _ in 0..3 {
+        cpu.step(&mut bus);
+    }
+
+    for i in 0..4 {
+        let got = f32::from_bits(cpu.vregs.read_elem(3, 32, i) as u32);
+        assert_eq!(got, 42.5, "vfmv.v.f elem {i}");
+    }
+}
+
+#[test]
+fn test_vfmin_vv_f32() {
+    let mut bus = Bus::new(64 * 1024);
+    let prog = [
+        v_addi(1, 0, 4),
+        vsetvli(2, 1, 0b0_0_010_000),
+        opfvv(0b000100, 3, 1, 2, 1), // vfmin.vv v3, v2, v1
+    ];
+    let bytes: Vec<u8> = prog.iter().flat_map(|i| i.to_le_bytes()).collect();
+    bus.load_binary(&bytes, 0);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    for (i, val) in [1.0f32, 20.0, 3.0, 40.0].iter().enumerate() {
+        cpu.vregs.write_elem(2, 32, i, val.to_bits() as u64);
+    }
+    for (i, val) in [10.0f32, 2.0, 30.0, 4.0].iter().enumerate() {
+        cpu.vregs.write_elem(1, 32, i, val.to_bits() as u64);
+    }
+
+    for _ in 0..3 {
+        cpu.step(&mut bus);
+    }
+
+    for (i, expected) in [1.0f32, 2.0, 3.0, 4.0].iter().enumerate() {
+        let got = f32::from_bits(cpu.vregs.read_elem(3, 32, i) as u32);
+        assert_eq!(got, *expected, "vfmin.vv elem {i}");
+    }
+}
+
+#[test]
+fn test_vfsgnj_vv_f32() {
+    let mut bus = Bus::new(64 * 1024);
+    let prog = [
+        v_addi(1, 0, 2),
+        vsetvli(2, 1, 0b0_0_010_000),
+        opfvv(0b100100, 3, 1, 2, 1), // vfsgnj.vv v3, v2, v1
+    ];
+    let bytes: Vec<u8> = prog.iter().flat_map(|i| i.to_le_bytes()).collect();
+    bus.load_binary(&bytes, 0);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    // v2 = [3.0, -5.0], v1 = [-1.0, 7.0]
+    cpu.vregs.write_elem(2, 32, 0, 3.0f32.to_bits() as u64);
+    cpu.vregs.write_elem(2, 32, 1, (-5.0f32).to_bits() as u64);
+    cpu.vregs.write_elem(1, 32, 0, (-1.0f32).to_bits() as u64);
+    cpu.vregs.write_elem(1, 32, 1, 7.0f32.to_bits() as u64);
+
+    for _ in 0..3 {
+        cpu.step(&mut bus);
+    }
+
+    let r0 = f32::from_bits(cpu.vregs.read_elem(3, 32, 0) as u32);
+    let r1 = f32::from_bits(cpu.vregs.read_elem(3, 32, 1) as u32);
+    assert_eq!(r0, -3.0, "vfsgnj: |3.0| with sign of -1.0 → -3.0");
+    assert_eq!(r1, 5.0, "vfsgnj: |5.0| with sign of 7.0 → 5.0");
+}
+
+#[test]
+fn test_vfadd_vv_f64() {
+    // Test f64 vector add
+    let mut bus = Bus::new(64 * 1024);
+    let prog = [
+        v_addi(1, 0, 4),
+        vsetvli(2, 1, 0b0_0_011_000), // e64, m1 → VLMAX=2
+        opfvv(0b000000, 3, 1, 2, 1),  // vfadd.vv v3, v2, v1
+    ];
+    let bytes: Vec<u8> = prog.iter().flat_map(|i| i.to_le_bytes()).collect();
+    bus.load_binary(&bytes, 0);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    cpu.vregs.write_elem(2, 64, 0, 1.5f64.to_bits());
+    cpu.vregs.write_elem(2, 64, 1, 2.5f64.to_bits());
+    cpu.vregs.write_elem(1, 64, 0, 10.0f64.to_bits());
+    cpu.vregs.write_elem(1, 64, 1, 20.0f64.to_bits());
+
+    for _ in 0..3 {
+        cpu.step(&mut bus);
+    }
+
+    assert_eq!(f64::from_bits(cpu.vregs.read_elem(3, 64, 0)), 11.5);
+    assert_eq!(f64::from_bits(cpu.vregs.read_elem(3, 64, 1)), 22.5);
+}
+
+#[test]
+fn test_vfclass_f32() {
+    // vfclass.v v3, v2 (funct6=0b010011, vs1=0b10000)
+    let mut bus = Bus::new(64 * 1024);
+    let prog = [
+        v_addi(1, 0, 4),
+        vsetvli(2, 1, 0b0_0_010_000),
+        opfvv(0b010011, 3, 0b10000, 2, 1),
+    ];
+    let bytes: Vec<u8> = prog.iter().flat_map(|i| i.to_le_bytes()).collect();
+    bus.load_binary(&bytes, 0);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    cpu.vregs
+        .write_elem(2, 32, 0, f32::NEG_INFINITY.to_bits() as u64);
+    cpu.vregs.write_elem(2, 32, 1, 0u64); // +0
+    cpu.vregs.write_elem(2, 32, 2, 1.0f32.to_bits() as u64);
+    cpu.vregs
+        .write_elem(2, 32, 3, f32::INFINITY.to_bits() as u64);
+
+    for _ in 0..3 {
+        cpu.step(&mut bus);
+    }
+
+    assert_eq!(cpu.vregs.read_elem(3, 32, 0), 1 << 0, "-inf");
+    assert_eq!(cpu.vregs.read_elem(3, 32, 1), 1 << 4, "+0");
+    assert_eq!(cpu.vregs.read_elem(3, 32, 2), 1 << 6, "+normal");
+    assert_eq!(cpu.vregs.read_elem(3, 32, 3), 1 << 7, "+inf");
+}
+
+#[test]
+fn test_vfdiv_vv_f32() {
+    let mut bus = Bus::new(64 * 1024);
+    let prog = [
+        v_addi(1, 0, 4),
+        vsetvli(2, 1, 0b0_0_010_000),
+        opfvv(0b100000, 3, 1, 2, 1), // vfdiv.vv v3, v2, v1
+    ];
+    let bytes: Vec<u8> = prog.iter().flat_map(|i| i.to_le_bytes()).collect();
+    bus.load_binary(&bytes, 0);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    for (i, val) in [10.0f32, 20.0, 30.0, 40.0].iter().enumerate() {
+        cpu.vregs.write_elem(2, 32, i, val.to_bits() as u64);
+    }
+    for (i, val) in [2.0f32, 4.0, 5.0, 8.0].iter().enumerate() {
+        cpu.vregs.write_elem(1, 32, i, val.to_bits() as u64);
+    }
+
+    for _ in 0..3 {
+        cpu.step(&mut bus);
+    }
+
+    for (i, expected) in [5.0f32, 5.0, 6.0, 5.0].iter().enumerate() {
+        let got = f32::from_bits(cpu.vregs.read_elem(3, 32, i) as u32);
+        assert_eq!(got, *expected, "vfdiv.vv elem {i}");
+    }
+}
+
+// ============== Strided/Indexed Vector Load/Store Tests ==============
+
+/// Helper: encode strided vector load (vlse)
+/// mop=2 | vm | rs2 | rs1 | width | vd | 0000111
+fn vlse(eew: u32, vd: u32, rs1: u32, rs2: u32, vm: u32) -> u32 {
+    let width = match eew {
+        8 => 0,
+        16 => 5,
+        32 => 6,
+        64 => 7,
+        _ => 0,
+    };
+    (2u32 << 26)
+        | ((vm & 1) << 25)
+        | ((rs2 & 0x1F) << 20)
+        | ((rs1 & 0x1F) << 15)
+        | (width << 12)
+        | ((vd & 0x1F) << 7)
+        | 0x07
+}
+
+/// Helper: encode strided vector store (vsse)
+fn vsse(eew: u32, vs3: u32, rs1: u32, rs2: u32, vm: u32) -> u32 {
+    let width = match eew {
+        8 => 0,
+        16 => 5,
+        32 => 6,
+        64 => 7,
+        _ => 0,
+    };
+    (2u32 << 26)
+        | ((vm & 1) << 25)
+        | ((rs2 & 0x1F) << 20)
+        | ((rs1 & 0x1F) << 15)
+        | (width << 12)
+        | ((vs3 & 0x1F) << 7)
+        | 0x27
+}
+
+/// Helper: encode indexed vector load (vluxei / vloxei)
+/// mop=1(unordered) | vm | vs2 | rs1 | width | vd | 0000111
+fn vluxei(eew: u32, vd: u32, rs1: u32, vs2: u32, vm: u32) -> u32 {
+    let width = match eew {
+        8 => 0,
+        16 => 5,
+        32 => 6,
+        64 => 7,
+        _ => 0,
+    };
+    (1u32 << 26)
+        | ((vm & 1) << 25)
+        | ((vs2 & 0x1F) << 20)
+        | ((rs1 & 0x1F) << 15)
+        | (width << 12)
+        | ((vd & 0x1F) << 7)
+        | 0x07
+}
+
+#[test]
+fn test_vlse32_strided_load() {
+    // Load every other word: base at data area, stride=8 (skip one u32)
+    let data_off: u32 = 256; // offset from DRAM_BASE for data
+    let mut bus = Bus::new(64 * 1024);
+
+    // Store data: 10, 99, 20, 99, 30, 99, 40, 99 as u32 at data area
+    let data_base = DRAM_BASE + data_off as u64;
+    for (i, val) in [10u32, 99, 20, 99, 30, 99, 40, 99].iter().enumerate() {
+        let addr = data_base + (i as u64) * 4;
+        bus.write32(addr, *val);
+    }
+
+    let prog = [
+        v_addi(1, 0, 4),              // x1 = 4 (avl)
+        vsetvli(2, 1, 0b0_0_010_000), // e32, m1
+        // x3 = base address
+        // We need to load DRAM_BASE + data_off into x3
+        // Use LUI + ADDI
+        0x80000197u32, // auipc x3, 0x80000 — but this is tricky, let's use a different approach
+    ];
+
+    // Simpler: manually set regs and run just the vector instructions
+    let prog2 = [
+        v_addi(1, 0, 4),
+        vsetvli(2, 1, 0b0_0_010_000),
+        vlse(32, 4, 3, 5, 1), // vlse32.v v4, (x3), x5
+    ];
+    let bytes: Vec<u8> = prog2.iter().flat_map(|i| i.to_le_bytes()).collect();
+    bus.load_binary(&bytes, 0);
+
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+    cpu.regs[3] = data_base; // base pointer
+    cpu.regs[5] = 8; // stride = 8 bytes (skip every other u32)
+
+    for _ in 0..3 {
+        cpu.step(&mut bus);
+    }
+
+    // Should load elements at offsets 0, 8, 16, 24 → values 10, 20, 30, 40
+    for (i, expected) in [10u32, 20, 30, 40].iter().enumerate() {
+        let got = cpu.vregs.read_elem(4, 32, i) as u32;
+        assert_eq!(got, *expected, "vlse32 elem {i}");
+    }
+}
+
+#[test]
+fn test_vsse32_strided_store() {
+    let data_off: u64 = 256;
+    let mut bus = Bus::new(64 * 1024);
+
+    let prog = [
+        v_addi(1, 0, 4),
+        vsetvli(2, 1, 0b0_0_010_000),
+        vsse(32, 4, 3, 5, 1), // vsse32.v v4, (x3), x5
+    ];
+    let bytes: Vec<u8> = prog.iter().flat_map(|i| i.to_le_bytes()).collect();
+    bus.load_binary(&bytes, 0);
+
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+    let data_base = DRAM_BASE + data_off;
+    cpu.regs[3] = data_base;
+    cpu.regs[5] = 8; // stride
+
+    for (i, val) in [100u32, 200, 300, 400].iter().enumerate() {
+        cpu.vregs.write_elem(4, 32, i, *val as u64);
+    }
+
+    for _ in 0..3 {
+        cpu.step(&mut bus);
+    }
+
+    for (i, expected) in [100u32, 200, 300, 400].iter().enumerate() {
+        let addr = data_base + (i as u64) * 8;
+        assert_eq!(bus.read32(addr), *expected, "vsse32 elem {i}");
+    }
+}
+
+#[test]
+fn test_vluxei32_indexed_load() {
+    let data_off: u64 = 256;
+    let mut bus = Bus::new(64 * 1024);
+    let data_base = DRAM_BASE + data_off;
+
+    // Place values at specific offsets
+    bus.write32(data_base + 0, 0xAA);
+    bus.write32(data_base + 12, 0xBB);
+    bus.write32(data_base + 4, 0xCC);
+    bus.write32(data_base + 20, 0xDD);
+
+    let prog = [
+        v_addi(1, 0, 4),
+        vsetvli(2, 1, 0b0_0_010_000), // e32, m1
+        vluxei(32, 4, 3, 5, 1),       // vluxei32.v v4, (x3), v5
+    ];
+    let bytes: Vec<u8> = prog.iter().flat_map(|i| i.to_le_bytes()).collect();
+    bus.load_binary(&bytes, 0);
+
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+    cpu.regs[3] = data_base;
+
+    // v5 = indices [0, 12, 4, 20]
+    for (i, off) in [0u32, 12, 4, 20].iter().enumerate() {
+        cpu.vregs.write_elem(5, 32, i, *off as u64);
+    }
+
+    for _ in 0..3 {
+        cpu.step(&mut bus);
+    }
+
+    for (i, expected) in [0xAAu32, 0xBB, 0xCC, 0xDD].iter().enumerate() {
+        let got = cpu.vregs.read_elem(4, 32, i) as u32;
+        assert_eq!(got, *expected, "vluxei32 elem {i}");
+    }
+}

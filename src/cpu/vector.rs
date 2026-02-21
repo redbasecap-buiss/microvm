@@ -325,7 +325,639 @@ fn execute_v_arith(cpu: &mut Cpu, bus: &mut Bus, raw: u32, inst_len: u64) -> boo
             cpu.pc += inst_len;
             true
         }
+        1 => {
+            // OPFVV: vector-vector floating-point
+            execute_fvv(cpu, &ctx);
+            cpu.pc += inst_len;
+            true
+        }
+        5 => {
+            // OPFVF: vector-scalar floating-point
+            let scalar = cpu.fregs[rs1];
+            execute_fvf(cpu, &ctx, scalar);
+            cpu.pc += inst_len;
+            true
+        }
         _ => false,
+    }
+}
+
+// ============================================================================
+// Floating-point helpers
+// ============================================================================
+
+fn f32_add(a: u64, b: u64) -> u64 {
+    (f32::from_bits(a as u32) + f32::from_bits(b as u32)).to_bits() as u64
+}
+fn f32_sub(a: u64, b: u64) -> u64 {
+    (f32::from_bits(a as u32) - f32::from_bits(b as u32)).to_bits() as u64
+}
+fn f32_mul(a: u64, b: u64) -> u64 {
+    (f32::from_bits(a as u32) * f32::from_bits(b as u32)).to_bits() as u64
+}
+fn f32_div(a: u64, b: u64) -> u64 {
+    (f32::from_bits(a as u32) / f32::from_bits(b as u32)).to_bits() as u64
+}
+fn f32_min(a: u64, b: u64) -> u64 {
+    let fa = f32::from_bits(a as u32);
+    let fb = f32::from_bits(b as u32);
+    if fa.is_nan() && fb.is_nan() {
+        return 0x7FC00000; // canonical NaN
+    }
+    if fa.is_nan() {
+        return b & 0xFFFFFFFF;
+    }
+    if fb.is_nan() {
+        return a & 0xFFFFFFFF;
+    }
+    // -0 < +0 per IEEE 754-2019
+    if fa == fb {
+        return if fa.to_bits() & 0x80000000 != 0 {
+            a & 0xFFFFFFFF
+        } else {
+            b & 0xFFFFFFFF
+        };
+    }
+    if fa < fb {
+        a & 0xFFFFFFFF
+    } else {
+        b & 0xFFFFFFFF
+    }
+}
+fn f32_max(a: u64, b: u64) -> u64 {
+    let fa = f32::from_bits(a as u32);
+    let fb = f32::from_bits(b as u32);
+    if fa.is_nan() && fb.is_nan() {
+        return 0x7FC00000;
+    }
+    if fa.is_nan() {
+        return b & 0xFFFFFFFF;
+    }
+    if fb.is_nan() {
+        return a & 0xFFFFFFFF;
+    }
+    if fa == fb {
+        return if fa.to_bits() & 0x80000000 == 0 {
+            a & 0xFFFFFFFF
+        } else {
+            b & 0xFFFFFFFF
+        };
+    }
+    if fa > fb {
+        a & 0xFFFFFFFF
+    } else {
+        b & 0xFFFFFFFF
+    }
+}
+fn f32_sqrt(a: u64) -> u64 {
+    f32::from_bits(a as u32).sqrt().to_bits() as u64
+}
+fn f32_neg(a: u64) -> u64 {
+    (a ^ 0x80000000) & 0xFFFFFFFF
+}
+fn f64_add(a: u64, b: u64) -> u64 {
+    (f64::from_bits(a) + f64::from_bits(b)).to_bits()
+}
+fn f64_sub(a: u64, b: u64) -> u64 {
+    (f64::from_bits(a) - f64::from_bits(b)).to_bits()
+}
+fn f64_mul(a: u64, b: u64) -> u64 {
+    (f64::from_bits(a) * f64::from_bits(b)).to_bits()
+}
+fn f64_div(a: u64, b: u64) -> u64 {
+    (f64::from_bits(a) / f64::from_bits(b)).to_bits()
+}
+fn f64_min(a: u64, b: u64) -> u64 {
+    let fa = f64::from_bits(a);
+    let fb = f64::from_bits(b);
+    if fa.is_nan() && fb.is_nan() {
+        return 0x7FF8000000000000;
+    }
+    if fa.is_nan() {
+        return b;
+    }
+    if fb.is_nan() {
+        return a;
+    }
+    if fa == fb {
+        return if fa.to_bits() & (1u64 << 63) != 0 {
+            a
+        } else {
+            b
+        };
+    }
+    if fa < fb {
+        a
+    } else {
+        b
+    }
+}
+fn f64_max(a: u64, b: u64) -> u64 {
+    let fa = f64::from_bits(a);
+    let fb = f64::from_bits(b);
+    if fa.is_nan() && fb.is_nan() {
+        return 0x7FF8000000000000;
+    }
+    if fa.is_nan() {
+        return b;
+    }
+    if fb.is_nan() {
+        return a;
+    }
+    if fa == fb {
+        return if fa.to_bits() & (1u64 << 63) == 0 {
+            a
+        } else {
+            b
+        };
+    }
+    if fa > fb {
+        a
+    } else {
+        b
+    }
+}
+fn f64_sqrt(a: u64) -> u64 {
+    f64::from_bits(a).sqrt().to_bits()
+}
+fn f64_neg(a: u64) -> u64 {
+    a ^ (1u64 << 63)
+}
+
+/// Apply a binary FP op at current SEW
+fn fp_binop(
+    sew: u32,
+    a: u64,
+    b: u64,
+    f32_op: fn(u64, u64) -> u64,
+    f64_op: fn(u64, u64) -> u64,
+) -> u64 {
+    match sew {
+        32 => f32_op(a, b),
+        64 => f64_op(a, b),
+        _ => 0,
+    }
+}
+
+fn fp_unop(sew: u32, a: u64, f32_op: fn(u64) -> u64, f64_op: fn(u64) -> u64) -> u64 {
+    match sew {
+        32 => f32_op(a),
+        64 => f64_op(a),
+        _ => 0,
+    }
+}
+
+fn fp_eq(sew: u32, a: u64, b: u64) -> bool {
+    match sew {
+        32 => f32::from_bits(a as u32) == f32::from_bits(b as u32),
+        64 => f64::from_bits(a) == f64::from_bits(b),
+        _ => false,
+    }
+}
+fn fp_lt(sew: u32, a: u64, b: u64) -> bool {
+    match sew {
+        32 => f32::from_bits(a as u32) < f32::from_bits(b as u32),
+        64 => f64::from_bits(a) < f64::from_bits(b),
+        _ => false,
+    }
+}
+fn fp_le(sew: u32, a: u64, b: u64) -> bool {
+    match sew {
+        32 => f32::from_bits(a as u32) <= f32::from_bits(b as u32),
+        64 => f64::from_bits(a) <= f64::from_bits(b),
+        _ => false,
+    }
+}
+fn fp_is_nan(sew: u32, a: u64) -> bool {
+    match sew {
+        32 => f32::from_bits(a as u32).is_nan(),
+        64 => f64::from_bits(a).is_nan(),
+        _ => false,
+    }
+}
+
+/// FP fused multiply-add: a*b+c
+fn fp_fma(sew: u32, a: u64, b: u64, c: u64) -> u64 {
+    match sew {
+        32 => f32::from_bits(a as u32)
+            .mul_add(f32::from_bits(b as u32), f32::from_bits(c as u32))
+            .to_bits() as u64,
+        64 => f64::from_bits(a)
+            .mul_add(f64::from_bits(b), f64::from_bits(c))
+            .to_bits(),
+        _ => 0,
+    }
+}
+
+fn fp_neg(sew: u32, a: u64) -> u64 {
+    match sew {
+        32 => f32_neg(a),
+        64 => f64_neg(a),
+        _ => 0,
+    }
+}
+
+/// Convert float to signed int (truncate)
+fn fp_to_int(sew: u32, a: u64) -> u64 {
+    match sew {
+        32 => {
+            let f = f32::from_bits(a as u32);
+            if f.is_nan() {
+                return trunc_sew(i32::MAX as u64, 32);
+            }
+            trunc_sew(f as i32 as u64, 32)
+        }
+        64 => {
+            let f = f64::from_bits(a);
+            if f.is_nan() {
+                return i64::MAX as u64;
+            }
+            f as i64 as u64
+        }
+        _ => 0,
+    }
+}
+
+/// Convert float to unsigned int (truncate)
+fn fp_to_uint(sew: u32, a: u64) -> u64 {
+    match sew {
+        32 => {
+            let f = f32::from_bits(a as u32);
+            if f.is_nan() || f < 0.0 {
+                return if f < 0.0 {
+                    0
+                } else {
+                    trunc_sew(u32::MAX as u64, 32)
+                };
+            }
+            trunc_sew(f as u32 as u64, 32)
+        }
+        64 => {
+            let f = f64::from_bits(a);
+            if f.is_nan() || f < 0.0 {
+                return if f < 0.0 { 0 } else { u64::MAX };
+            }
+            f as u64
+        }
+        _ => 0,
+    }
+}
+
+/// Convert signed int to float
+fn int_to_fp(sew: u32, a: u64) -> u64 {
+    match sew {
+        32 => (sext_sew(a, 32) as f32).to_bits() as u64,
+        64 => (a as i64 as f64).to_bits(),
+        _ => 0,
+    }
+}
+
+/// Convert unsigned int to float
+fn uint_to_fp(sew: u32, a: u64) -> u64 {
+    match sew {
+        32 => (trunc_sew(a, 32) as u32 as f32).to_bits() as u64,
+        64 => (a as f64).to_bits(),
+        _ => 0,
+    }
+}
+
+/// Approximate reciprocal (vfrec7)
+fn fp_rec7(sew: u32, a: u64) -> u64 {
+    match sew {
+        32 => (1.0f32 / f32::from_bits(a as u32)).to_bits() as u64,
+        64 => (1.0f64 / f64::from_bits(a)).to_bits(),
+        _ => 0,
+    }
+}
+
+/// Approximate reciprocal square root (vfrsqrt7)
+fn fp_rsqrt7(sew: u32, a: u64) -> u64 {
+    match sew {
+        32 => (1.0f32 / f32::from_bits(a as u32).sqrt()).to_bits() as u64,
+        64 => (1.0f64 / f64::from_bits(a).sqrt()).to_bits(),
+        _ => 0,
+    }
+}
+
+/// FP sign-injection: copy sign of b to a
+fn fp_sgnj(sew: u32, a: u64, b: u64) -> u64 {
+    match sew {
+        32 => (a & 0x7FFFFFFF) | (b & 0x80000000),
+        64 => (a & 0x7FFFFFFFFFFFFFFF) | (b & (1u64 << 63)),
+        _ => 0,
+    }
+}
+
+/// FP sign-injection negated: copy negated sign of b to a
+fn fp_sgnjn(sew: u32, a: u64, b: u64) -> u64 {
+    match sew {
+        32 => (a & 0x7FFFFFFF) | ((b ^ 0x80000000) & 0x80000000),
+        64 => (a & 0x7FFFFFFFFFFFFFFF) | ((b ^ (1u64 << 63)) & (1u64 << 63)),
+        _ => 0,
+    }
+}
+
+/// FP sign-injection XOR: XOR signs
+fn fp_sgnjx(sew: u32, a: u64, b: u64) -> u64 {
+    match sew {
+        32 => a ^ (b & 0x80000000),
+        64 => a ^ (b & (1u64 << 63)),
+        _ => 0,
+    }
+}
+
+// ============================================================================
+// OPFVV: vector-vector floating-point (funct3=1)
+// ============================================================================
+fn execute_fvv(cpu: &mut Cpu, ctx: &VCtx) {
+    let VCtx {
+        funct6,
+        vd,
+        vs1,
+        vs2,
+        vm,
+        vl,
+        sew,
+    } = *ctx;
+
+    match funct6 {
+        // Reductions
+        0b000001 => {
+            // vfredusum
+            let mut acc = cpu.vregs.read_elem(vs1, sew, 0);
+            for i in 0..vl as usize {
+                if elem_active(cpu, vm, i) {
+                    acc = fp_binop(sew, acc, cpu.vregs.read_elem(vs2, sew, i), f32_add, f64_add);
+                }
+            }
+            cpu.vregs.write_elem(vd, sew, 0, acc);
+        }
+        0b000011 => {
+            // vfredosum (ordered reduction — same as unordered in sequential emulator)
+            let mut acc = cpu.vregs.read_elem(vs1, sew, 0);
+            for i in 0..vl as usize {
+                if elem_active(cpu, vm, i) {
+                    acc = fp_binop(sew, acc, cpu.vregs.read_elem(vs2, sew, i), f32_add, f64_add);
+                }
+            }
+            cpu.vregs.write_elem(vd, sew, 0, acc);
+        }
+        0b000101 => {
+            // vfredmin
+            let mut acc = cpu.vregs.read_elem(vs1, sew, 0);
+            for i in 0..vl as usize {
+                if elem_active(cpu, vm, i) {
+                    acc = fp_binop(sew, acc, cpu.vregs.read_elem(vs2, sew, i), f32_min, f64_min);
+                }
+            }
+            cpu.vregs.write_elem(vd, sew, 0, acc);
+        }
+        0b000111 => {
+            // vfredmax
+            let mut acc = cpu.vregs.read_elem(vs1, sew, 0);
+            for i in 0..vl as usize {
+                if elem_active(cpu, vm, i) {
+                    acc = fp_binop(sew, acc, cpu.vregs.read_elem(vs2, sew, i), f32_max, f64_max);
+                }
+            }
+            cpu.vregs.write_elem(vd, sew, 0, acc);
+        }
+        _ => {
+            // Element-wise ops
+            execute_fvv_elemwise(cpu, ctx);
+        }
+    }
+}
+
+fn execute_fvv_elemwise(cpu: &mut Cpu, ctx: &VCtx) {
+    let VCtx {
+        funct6,
+        vd,
+        vs1,
+        vs2,
+        vm,
+        vl,
+        sew,
+    } = *ctx;
+
+    for i in 0..vl as usize {
+        if !elem_active(cpu, vm, i) {
+            continue;
+        }
+        let a = cpu.vregs.read_elem(vs2, sew, i);
+        let b = cpu.vregs.read_elem(vs1, sew, i);
+
+        let is_cmp = matches!(funct6, 0b011000 | 0b011001 | 0b011011 | 0b011100 | 0b011101);
+
+        let result = match funct6 {
+            0b000000 => fp_binop(sew, a, b, f32_add, f64_add), // vfadd
+            0b000010 => fp_binop(sew, a, b, f32_sub, f64_sub), // vfsub
+            0b001000 => fp_binop(sew, a, b, f32_mul, f64_mul), // vfmul
+            0b100000 => fp_binop(sew, a, b, f32_div, f64_div), // vfdiv
+            0b000100 => fp_binop(sew, a, b, f32_min, f64_min), // vfmin
+            0b000110 => fp_binop(sew, a, b, f32_max, f64_max), // vfmax
+            0b100100 => fp_sgnj(sew, a, b),                    // vfsgnj
+            0b100101 => fp_sgnjn(sew, a, b),                   // vfsgnjn
+            0b100110 => fp_sgnjx(sew, a, b),                   // vfsgnjx
+
+            // Unary ops encoded in vs1 field (funct6=0b010010)
+            0b010010 => {
+                let subfunct = vs1;
+                match subfunct {
+                    0b00000 => fp_unop(sew, a, f32_sqrt, f64_sqrt), // vfsqrt
+                    0b00100 => fp_rsqrt7(sew, a),                   // vfrsqrt7
+                    0b00101 => fp_rec7(sew, a),                     // vfrec7
+                    0b10000 => fp_to_uint(sew, a),                  // vfcvt.xu.f
+                    0b10001 => fp_to_int(sew, a),                   // vfcvt.x.f
+                    0b10010 => uint_to_fp(sew, a),                  // vfcvt.f.xu
+                    0b10011 => int_to_fp(sew, a),                   // vfcvt.f.x
+                    0b10110 => fp_to_uint(sew, a),                  // vfcvt.rtz.xu.f
+                    0b10111 => fp_to_int(sew, a),                   // vfcvt.rtz.x.f
+                    _ => continue,
+                }
+            }
+
+            // vfclass (per-element FP classification → bit mask)
+            0b010011 if vs1 == 0b10000 => match sew {
+                32 => classify_f32(a) as u64,
+                64 => classify_f64(a) as u64,
+                _ => continue,
+            },
+
+            // Fused multiply-add family
+            0b101000 => fp_fma(sew, a, cpu.vregs.read_elem(vd, sew, i), b), // vfmadd: vd=vs2*vd+vs1
+            0b101001 => fp_fma(sew, fp_neg(sew, a), cpu.vregs.read_elem(vd, sew, i), b), // vfnmadd
+            0b101010 => fp_fma(sew, a, cpu.vregs.read_elem(vd, sew, i), fp_neg(sew, b)), // vfmsub
+            0b101011 => fp_fma(
+                sew,
+                fp_neg(sew, a),
+                cpu.vregs.read_elem(vd, sew, i),
+                fp_neg(sew, b),
+            ), // vfnmsub
+            0b101100 => fp_fma(sew, a, b, cpu.vregs.read_elem(vd, sew, i)), // vfmacc: vd=vs2*vs1+vd
+            0b101101 => fp_neg(sew, fp_fma(sew, a, b, cpu.vregs.read_elem(vd, sew, i))), // vfnmacc
+            0b101110 => fp_fma(sew, a, b, fp_neg(sew, cpu.vregs.read_elem(vd, sew, i))), // vfmsac
+            0b101111 => fp_neg(
+                sew,
+                fp_fma(sew, a, b, fp_neg(sew, cpu.vregs.read_elem(vd, sew, i))),
+            ), // vfnmsac
+
+            // Comparisons
+            0b011000 => u64::from(fp_eq(sew, a, b)), // vmfeq
+            0b011001 => u64::from(fp_le(sew, a, b)), // vmfle
+            0b011011 => u64::from(fp_lt(sew, a, b)), // vmflt
+            0b011100 => u64::from(!fp_eq(sew, a, b) && !fp_is_nan(sew, a) && !fp_is_nan(sew, b)), // vmfne (ordered)
+            0b011101 => u64::from(!fp_le(sew, a, b) && !fp_is_nan(sew, a)), // vmfgt (redundant enc)
+            _ => continue,
+        };
+
+        if is_cmp {
+            cpu.vregs.set_mask_bit(vd, i, result != 0);
+        } else {
+            cpu.vregs.write_elem(vd, sew, i, result);
+        }
+    }
+}
+
+/// FP classify for f32: returns 10-bit classification mask
+fn classify_f32(bits: u64) -> u32 {
+    let b = bits as u32;
+    let sign = (b >> 31) & 1;
+    let exp = (b >> 23) & 0xFF;
+    let frac = b & 0x7FFFFF;
+    match (sign, exp, frac) {
+        (1, 0xFF, 0) => 1 << 0,                          // -inf
+        (1, 0xFF, _) if frac & (1 << 22) == 0 => 1 << 8, // sNaN
+        (1, 0xFF, _) => 1 << 9,                          // qNaN
+        (1, 0, 0) => 1 << 3,                             // -0
+        (1, 0, _) => 1 << 2,                             // -subnormal
+        (1, _, _) => 1 << 1,                             // -normal
+        (0, 0xFF, 0) => 1 << 7,                          // +inf
+        (0, 0xFF, _) if frac & (1 << 22) == 0 => 1 << 8,
+        (0, 0xFF, _) => 1 << 9,
+        (0, 0, 0) => 1 << 4, // +0
+        (0, 0, _) => 1 << 5, // +subnormal
+        (0, _, _) => 1 << 6, // +normal
+        _ => 0,
+    }
+}
+
+/// FP classify for f64: returns 10-bit classification mask
+fn classify_f64(bits: u64) -> u32 {
+    let sign = (bits >> 63) & 1;
+    let exp = ((bits >> 52) & 0x7FF) as u32;
+    let frac = bits & 0xFFFFFFFFFFFFF;
+    match (sign, exp, frac) {
+        (1, 0x7FF, 0) => 1 << 0,
+        (1, 0x7FF, _) if frac & (1 << 51) == 0 => 1 << 8,
+        (1, 0x7FF, _) => 1 << 9,
+        (1, 0, 0) => 1 << 3,
+        (1, 0, _) => 1 << 2,
+        (1, _, _) => 1 << 1,
+        (0, 0x7FF, 0) => 1 << 7,
+        (0, 0x7FF, _) if frac & (1 << 51) == 0 => 1 << 8,
+        (0, 0x7FF, _) => 1 << 9,
+        (0, 0, 0) => 1 << 4,
+        (0, 0, _) => 1 << 5,
+        (0, _, _) => 1 << 6,
+        _ => 0,
+    }
+}
+
+// ============================================================================
+// OPFVF: vector-scalar floating-point (funct3=5)
+// ============================================================================
+fn execute_fvf(cpu: &mut Cpu, ctx: &VCtx, scalar: u64) {
+    let VCtx {
+        funct6,
+        vd,
+        vs2,
+        vm,
+        vl,
+        sew,
+        ..
+    } = *ctx;
+
+    for i in 0..vl as usize {
+        if !elem_active(cpu, vm, i) {
+            continue;
+        }
+        let a = cpu.vregs.read_elem(vs2, sew, i);
+        let b = scalar;
+
+        let is_cmp = matches!(funct6, 0b011000 | 0b011001 | 0b011011 | 0b011100 | 0b011101);
+
+        let result = match funct6 {
+            0b000000 => fp_binop(sew, a, b, f32_add, f64_add), // vfadd
+            0b000010 => fp_binop(sew, a, b, f32_sub, f64_sub), // vfsub
+            0b100111 => fp_binop(sew, b, a, f32_sub, f64_sub), // vfrsub
+            0b001000 => fp_binop(sew, a, b, f32_mul, f64_mul), // vfmul
+            0b100000 => fp_binop(sew, a, b, f32_div, f64_div), // vfdiv
+            0b100001 => fp_binop(sew, b, a, f32_div, f64_div), // vfrdiv
+            0b000100 => fp_binop(sew, a, b, f32_min, f64_min), // vfmin
+            0b000110 => fp_binop(sew, a, b, f32_max, f64_max), // vfmax
+            0b100100 => fp_sgnj(sew, a, b),                    // vfsgnj
+            0b100101 => fp_sgnjn(sew, a, b),                   // vfsgnjn
+            0b100110 => fp_sgnjx(sew, a, b),                   // vfsgnjx
+
+            // vfmerge/vfmv
+            0b010111 => {
+                if vm == 1 {
+                    // vfmv.v.f
+                    b
+                } else if cpu.vregs.mask_bit(i) {
+                    b
+                } else {
+                    a
+                }
+            }
+
+            // Fused multiply-add family
+            0b101000 => fp_fma(sew, a, cpu.vregs.read_elem(vd, sew, i), b), // vfmadd
+            0b101001 => fp_fma(sew, fp_neg(sew, a), cpu.vregs.read_elem(vd, sew, i), b), // vfnmadd
+            0b101010 => fp_fma(sew, a, cpu.vregs.read_elem(vd, sew, i), fp_neg(sew, b)), // vfmsub
+            0b101011 => fp_fma(
+                sew,
+                fp_neg(sew, a),
+                cpu.vregs.read_elem(vd, sew, i),
+                fp_neg(sew, b),
+            ), // vfnmsub
+            0b101100 => fp_fma(sew, a, b, cpu.vregs.read_elem(vd, sew, i)), // vfmacc
+            0b101101 => fp_neg(sew, fp_fma(sew, a, b, cpu.vregs.read_elem(vd, sew, i))), // vfnmacc
+            0b101110 => fp_fma(sew, a, b, fp_neg(sew, cpu.vregs.read_elem(vd, sew, i))), // vfmsac
+            0b101111 => fp_neg(
+                sew,
+                fp_fma(sew, a, b, fp_neg(sew, cpu.vregs.read_elem(vd, sew, i))),
+            ), // vfnmsac
+
+            // Comparisons
+            0b011000 => u64::from(fp_eq(sew, a, b)),
+            0b011001 => u64::from(fp_le(sew, a, b)),
+            0b011011 => u64::from(fp_lt(sew, a, b)),
+            0b011100 => u64::from(!fp_eq(sew, a, b) && !fp_is_nan(sew, a) && !fp_is_nan(sew, b)),
+            0b011101 => u64::from(!fp_le(sew, b, a)), // vmfgt (a > b)
+
+            _ => continue,
+        };
+
+        if is_cmp {
+            cpu.vregs.set_mask_bit(vd, i, result != 0);
+        } else {
+            cpu.vregs.write_elem(vd, sew, i, result);
+        }
+    }
+
+    // Handle vfmv.s.f separately (funct6=0b010000, vs2=0)
+    if funct6 == 0b010000 && vl > 0 {
+        cpu.vregs.write_elem(
+            vd,
+            sew,
+            0,
+            match sew {
+                32 => scalar & 0xFFFFFFFF,
+                _ => scalar,
+            },
+        );
     }
 }
 
@@ -613,13 +1245,12 @@ fn execute_v_load(cpu: &mut Cpu, bus: &mut Bus, raw: u32, inst_len: u64) -> bool
         _ => return false,
     };
 
-    if mop != 0 {
+    let vtype = current_vtype(cpu);
+    if mop == 0 && vtype.vill && lumop != 0b01000 {
         cpu.handle_exception(2, raw as u64, bus);
         return true;
     }
-
-    let vtype = current_vtype(cpu);
-    if vtype.vill && lumop != 0b01000 {
+    if mop != 0 && vtype.vill {
         cpu.handle_exception(2, raw as u64, bus);
         return true;
     }
@@ -627,17 +1258,37 @@ fn execute_v_load(cpu: &mut Cpu, bus: &mut Bus, raw: u32, inst_len: u64) -> bool
     set_vs_dirty(cpu);
     let base = cpu.regs[rs1];
 
-    if lumop == 0b01000 {
-        // Whole register load
-        let num_regs = nf + 1;
-        for r in 0..num_regs {
-            for b in 0..VLENB {
-                let addr = base + (r * VLENB + b) as u64;
-                match cpu
-                    .mmu
-                    .translate(addr, AccessType::Read, cpu.mode, &cpu.csrs, bus)
-                {
-                    Ok(phys) => cpu.vregs.data[vd + r][b] = bus.read8(phys),
+    match mop {
+        0 if lumop == 0b01000 => {
+            // Whole register load
+            let num_regs = nf + 1;
+            for r in 0..num_regs {
+                for b in 0..VLENB {
+                    let addr = base + (r * VLENB + b) as u64;
+                    match cpu
+                        .mmu
+                        .translate(addr, AccessType::Read, cpu.mode, &cpu.csrs, bus)
+                    {
+                        Ok(phys) => cpu.vregs.data[vd + r][b] = bus.read8(phys),
+                        Err(e) => {
+                            cpu.handle_exception(e, addr, bus);
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        0 => {
+            // Unit-stride load
+            let vl = current_vl(cpu);
+            let eew_bytes = eew as u64 / 8;
+            for i in 0..vl as usize {
+                if !elem_active(cpu, vm, i) {
+                    continue;
+                }
+                let addr = base + (i as u64) * eew_bytes;
+                match v_load_elem(cpu, bus, addr, eew) {
+                    Ok(val) => cpu.vregs.write_elem(vd, eew, i, val),
                     Err(e) => {
                         cpu.handle_exception(e, addr, bus);
                         return true;
@@ -645,37 +1296,68 @@ fn execute_v_load(cpu: &mut Cpu, bus: &mut Bus, raw: u32, inst_len: u64) -> bool
                 }
             }
         }
-    } else {
-        let vl = current_vl(cpu);
-        let eew_bytes = eew as u64 / 8;
-        for i in 0..vl as usize {
-            if !elem_active(cpu, vm, i) {
-                continue;
-            }
-            let addr = base + (i as u64) * eew_bytes;
-            let phys = match cpu
-                .mmu
-                .translate(addr, AccessType::Read, cpu.mode, &cpu.csrs, bus)
-            {
-                Ok(a) => a,
-                Err(e) => {
-                    cpu.handle_exception(e, addr, bus);
-                    return true;
+        2 => {
+            // Strided load: rs2 = stride
+            let rs2 = ((raw >> 20) & 0x1F) as usize;
+            let stride = cpu.regs[rs2] as i64;
+            let vl = current_vl(cpu);
+            for i in 0..vl as usize {
+                if !elem_active(cpu, vm, i) {
+                    continue;
                 }
-            };
-            let val = match eew {
-                8 => bus.read8(phys) as u64,
-                16 => bus.read16(phys) as u64,
-                32 => bus.read32(phys) as u64,
-                64 => bus.read64(phys),
-                _ => 0,
-            };
-            cpu.vregs.write_elem(vd, eew, i, val);
+                let addr = (base as i64 + (i as i64) * stride) as u64;
+                match v_load_elem(cpu, bus, addr, eew) {
+                    Ok(val) => cpu.vregs.write_elem(vd, eew, i, val),
+                    Err(e) => {
+                        cpu.handle_exception(e, addr, bus);
+                        return true;
+                    }
+                }
+            }
+        }
+        1 | 3 => {
+            // Indexed load: vs2 contains indices
+            let vs2_reg = ((raw >> 20) & 0x1F) as usize;
+            let vl = current_vl(cpu);
+            let idx_sew = eew; // unordered(1) / ordered(3) use same logic
+            for i in 0..vl as usize {
+                if !elem_active(cpu, vm, i) {
+                    continue;
+                }
+                let offset = cpu.vregs.read_elem(vs2_reg, idx_sew, i);
+                let addr = base.wrapping_add(offset);
+                let data_sew = vtype.sew;
+                match v_load_elem(cpu, bus, addr, data_sew) {
+                    Ok(val) => cpu.vregs.write_elem(vd, data_sew, i, val),
+                    Err(e) => {
+                        cpu.handle_exception(e, addr, bus);
+                        return true;
+                    }
+                }
+            }
+        }
+        _ => {
+            cpu.handle_exception(2, raw as u64, bus);
+            return true;
         }
     }
 
     cpu.pc += inst_len;
     true
+}
+
+/// Helper: load a single element from memory
+fn v_load_elem(cpu: &mut Cpu, bus: &mut Bus, addr: u64, eew: u32) -> Result<u64, u64> {
+    let phys = cpu
+        .mmu
+        .translate(addr, AccessType::Read, cpu.mode, &cpu.csrs, bus)?;
+    Ok(match eew {
+        8 => bus.read8(phys) as u64,
+        16 => bus.read16(phys) as u64,
+        32 => bus.read32(phys) as u64,
+        64 => bus.read64(phys),
+        _ => 0,
+    })
 }
 
 // ============================================================================
@@ -698,68 +1380,113 @@ fn execute_v_store(cpu: &mut Cpu, bus: &mut Bus, raw: u32, inst_len: u64) -> boo
         _ => return false,
     };
 
-    if mop != 0 {
+    let vtype = current_vtype(cpu);
+    if mop == 0 && vtype.vill && sumop != 0b01000 {
         cpu.handle_exception(2, raw as u64, bus);
         return true;
     }
-
-    let vtype = current_vtype(cpu);
-    if vtype.vill && sumop != 0b01000 {
+    if mop != 0 && vtype.vill {
         cpu.handle_exception(2, raw as u64, bus);
         return true;
     }
 
     let base = cpu.regs[rs1];
 
-    if sumop == 0b01000 {
-        // Whole register store
-        let num_regs = nf + 1;
-        for r in 0..num_regs {
-            for b in 0..VLENB {
-                let addr = base + (r * VLENB + b) as u64;
-                match cpu
-                    .mmu
-                    .translate(addr, AccessType::Write, cpu.mode, &cpu.csrs, bus)
-                {
-                    Ok(phys) => bus.write8(phys, cpu.vregs.data[vs3 + r][b]),
-                    Err(e) => {
-                        cpu.handle_exception(e, addr, bus);
-                        return true;
+    match mop {
+        0 if sumop == 0b01000 => {
+            // Whole register store
+            let num_regs = nf + 1;
+            for r in 0..num_regs {
+                for b in 0..VLENB {
+                    let addr = base + (r * VLENB + b) as u64;
+                    match cpu
+                        .mmu
+                        .translate(addr, AccessType::Write, cpu.mode, &cpu.csrs, bus)
+                    {
+                        Ok(phys) => bus.write8(phys, cpu.vregs.data[vs3 + r][b]),
+                        Err(e) => {
+                            cpu.handle_exception(e, addr, bus);
+                            return true;
+                        }
                     }
                 }
             }
         }
-    } else {
-        let vl = current_vl(cpu);
-        let eew_bytes = eew as u64 / 8;
-        for i in 0..vl as usize {
-            if !elem_active(cpu, vm, i) {
-                continue;
-            }
-            let addr = base + (i as u64) * eew_bytes;
-            let phys = match cpu
-                .mmu
-                .translate(addr, AccessType::Write, cpu.mode, &cpu.csrs, bus)
-            {
-                Ok(a) => a,
-                Err(e) => {
+        0 => {
+            // Unit-stride store
+            let vl = current_vl(cpu);
+            let eew_bytes = eew as u64 / 8;
+            for i in 0..vl as usize {
+                if !elem_active(cpu, vm, i) {
+                    continue;
+                }
+                let addr = base + (i as u64) * eew_bytes;
+                let val = cpu.vregs.read_elem(vs3, eew, i);
+                if let Err(e) = v_store_elem(cpu, bus, addr, eew, val) {
                     cpu.handle_exception(e, addr, bus);
                     return true;
                 }
-            };
-            let val = cpu.vregs.read_elem(vs3, eew, i);
-            match eew {
-                8 => bus.write8(phys, val as u8),
-                16 => bus.write16(phys, val as u16),
-                32 => bus.write32(phys, val as u32),
-                64 => bus.write64(phys, val),
-                _ => {}
             }
+        }
+        2 => {
+            // Strided store
+            let rs2 = ((raw >> 20) & 0x1F) as usize;
+            let stride = cpu.regs[rs2] as i64;
+            let vl = current_vl(cpu);
+            for i in 0..vl as usize {
+                if !elem_active(cpu, vm, i) {
+                    continue;
+                }
+                let addr = (base as i64 + (i as i64) * stride) as u64;
+                let val = cpu.vregs.read_elem(vs3, eew, i);
+                if let Err(e) = v_store_elem(cpu, bus, addr, eew, val) {
+                    cpu.handle_exception(e, addr, bus);
+                    return true;
+                }
+            }
+        }
+        1 | 3 => {
+            // Indexed store
+            let vs2_reg = ((raw >> 20) & 0x1F) as usize;
+            let vl = current_vl(cpu);
+            let idx_sew = eew;
+            let data_sew = vtype.sew;
+            for i in 0..vl as usize {
+                if !elem_active(cpu, vm, i) {
+                    continue;
+                }
+                let offset = cpu.vregs.read_elem(vs2_reg, idx_sew, i);
+                let addr = base.wrapping_add(offset);
+                let val = cpu.vregs.read_elem(vs3, data_sew, i);
+                if let Err(e) = v_store_elem(cpu, bus, addr, data_sew, val) {
+                    cpu.handle_exception(e, addr, bus);
+                    return true;
+                }
+            }
+        }
+        _ => {
+            cpu.handle_exception(2, raw as u64, bus);
+            return true;
         }
     }
 
     cpu.pc += inst_len;
     true
+}
+
+/// Helper: store a single element to memory
+fn v_store_elem(cpu: &mut Cpu, bus: &mut Bus, addr: u64, eew: u32, val: u64) -> Result<(), u64> {
+    let phys = cpu
+        .mmu
+        .translate(addr, AccessType::Write, cpu.mode, &cpu.csrs, bus)?;
+    match eew {
+        8 => bus.write8(phys, val as u8),
+        16 => bus.write16(phys, val as u16),
+        32 => bus.write32(phys, val as u32),
+        64 => bus.write64(phys, val),
+        _ => {}
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -862,5 +1589,136 @@ mod tests {
         assert_eq!(sext_sew(0x7F, 8), 127);
         assert_eq!(sext_sew(0xFFFF, 16), -1);
         assert_eq!(sext_sew(0xFFFFFFFF, 32), -1);
+    }
+
+    // ===== Vector FP unit tests =====
+
+    #[test]
+    fn fp_add_f32() {
+        let a = 2.0f32.to_bits() as u64;
+        let b = 3.0f32.to_bits() as u64;
+        let r = f32_add(a, b);
+        assert_eq!(f32::from_bits(r as u32), 5.0);
+    }
+
+    #[test]
+    fn fp_sub_f32() {
+        let a = 5.0f32.to_bits() as u64;
+        let b = 3.0f32.to_bits() as u64;
+        let r = f32_sub(a, b);
+        assert_eq!(f32::from_bits(r as u32), 2.0);
+    }
+
+    #[test]
+    fn fp_mul_f32() {
+        let a = 3.0f32.to_bits() as u64;
+        let b = 4.0f32.to_bits() as u64;
+        let r = f32_mul(a, b);
+        assert_eq!(f32::from_bits(r as u32), 12.0);
+    }
+
+    #[test]
+    fn fp_div_f32() {
+        let a = 12.0f32.to_bits() as u64;
+        let b = 4.0f32.to_bits() as u64;
+        let r = f32_div(a, b);
+        assert_eq!(f32::from_bits(r as u32), 3.0);
+    }
+
+    #[test]
+    fn fp_min_nan_propagation() {
+        let nan = f32::NAN.to_bits() as u64;
+        let val = 1.0f32.to_bits() as u64;
+        assert_eq!(f32_min(nan, val), val);
+        assert_eq!(f32_min(val, nan), val);
+        assert!(f32::from_bits(f32_min(nan, nan) as u32).is_nan());
+    }
+
+    #[test]
+    fn fp_max_nan_propagation() {
+        let nan = f32::NAN.to_bits() as u64;
+        let val = 1.0f32.to_bits() as u64;
+        assert_eq!(f32_max(nan, val), val);
+        assert_eq!(f32_max(val, nan), val);
+        assert!(f32::from_bits(f32_max(nan, nan) as u32).is_nan());
+    }
+
+    #[test]
+    fn fp_fma_f32() {
+        let a = 2.0f32.to_bits() as u64;
+        let b = 3.0f32.to_bits() as u64;
+        let c = 1.0f32.to_bits() as u64;
+        let r = fp_fma(32, a, b, c);
+        assert_eq!(f32::from_bits(r as u32), 7.0); // 2*3+1
+    }
+
+    #[test]
+    fn fp_fma_f64() {
+        let a = 2.0f64.to_bits();
+        let b = 3.0f64.to_bits();
+        let c = 1.0f64.to_bits();
+        let r = fp_fma(64, a, b, c);
+        assert_eq!(f64::from_bits(r), 7.0);
+    }
+
+    #[test]
+    fn fp_sgnj_f32() {
+        let pos = 1.0f32.to_bits() as u64;
+        let neg = (-2.0f32).to_bits() as u64;
+        let r = fp_sgnj(32, pos, neg);
+        assert_eq!(f32::from_bits(r as u32), -1.0); // magnitude of pos, sign of neg
+    }
+
+    #[test]
+    fn fp_classify_f32_values() {
+        assert_eq!(classify_f32(f32::NEG_INFINITY.to_bits() as u64), 1 << 0);
+        assert_eq!(classify_f32((-1.0f32).to_bits() as u64), 1 << 1);
+        assert_eq!(
+            classify_f32(f32::from_bits(0x80000000).to_bits() as u64),
+            1 << 3
+        ); // -0
+        assert_eq!(classify_f32(0.0f32.to_bits() as u64), 1 << 4);
+        assert_eq!(classify_f32(1.0f32.to_bits() as u64), 1 << 6);
+        assert_eq!(classify_f32(f32::INFINITY.to_bits() as u64), 1 << 7);
+    }
+
+    #[test]
+    fn fp_classify_f64_values() {
+        assert_eq!(classify_f64(f64::NEG_INFINITY.to_bits()), 1 << 0);
+        assert_eq!(classify_f64((-1.0f64).to_bits()), 1 << 1);
+        assert_eq!(classify_f64(0.0f64.to_bits()), 1 << 4);
+        assert_eq!(classify_f64(1.0f64.to_bits()), 1 << 6);
+        assert_eq!(classify_f64(f64::INFINITY.to_bits()), 1 << 7);
+    }
+
+    #[test]
+    fn fp_to_int_conversions() {
+        assert_eq!(fp_to_int(32, 3.7f32.to_bits() as u64), 3u32 as u64);
+        assert_eq!(
+            fp_to_int(32, (-2.9f32).to_bits() as u64),
+            trunc_sew(-2i32 as u64, 32)
+        );
+        assert_eq!(fp_to_uint(32, 3.7f32.to_bits() as u64), 3u64);
+        assert_eq!(fp_to_uint(32, (-1.0f32).to_bits() as u64), 0); // negative → 0
+    }
+
+    #[test]
+    fn int_to_fp_conversions() {
+        let r = int_to_fp(32, trunc_sew(-5i32 as u64, 32));
+        assert_eq!(f32::from_bits(r as u32), -5.0);
+        let r = uint_to_fp(32, 42u64);
+        assert_eq!(f32::from_bits(r as u32), 42.0);
+    }
+
+    #[test]
+    fn fp_f64_ops() {
+        let a = 10.0f64.to_bits();
+        let b = 3.0f64.to_bits();
+        assert_eq!(f64::from_bits(f64_add(a, b)), 13.0);
+        assert_eq!(f64::from_bits(f64_sub(a, b)), 7.0);
+        assert_eq!(f64::from_bits(f64_mul(a, b)), 30.0);
+        let d = f64::from_bits(f64_div(a, b));
+        assert!((d - 10.0 / 3.0).abs() < 1e-10);
+        assert_eq!(f64::from_bits(f64_sqrt(4.0f64.to_bits())), 2.0);
     }
 }

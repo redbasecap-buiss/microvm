@@ -227,6 +227,8 @@ microvm run --example minimal-kernel
 - [x] Svadu (hardware A/D bit management)
 - [x] Boot actual Linux kernel
 - [x] Vector extension (V) 1.0 — VLEN=128, integer arithmetic, loads/stores, reductions
+- [x] Vector FP ops — vfadd/sub/mul/div/min/max/sqrt, FMA, comparisons, conversions, classify
+- [x] Strided & indexed vector loads/stores
 
 ### v0.4.0 — Developer Experience
 - [ ] Built-in kernel builder
