@@ -911,20 +911,20 @@ fn op_reg32(cpu: &mut Cpu, inst: &Instruction, len: u64) {
             (1, 0x00) => (rs1 << (rs2 & 0x1F)) as i32 as i64 as u64, // SLLW
             (5, 0x00) => (rs1 >> (rs2 & 0x1F)) as i32 as i64 as u64, // SRLW
             (5, 0x20) => ((rs1 as i32) >> (rs2 & 0x1F)) as i64 as u64, // SRAW
-            // Zba: address generation (W variants — zero-extend rs2 to 32 bits first)
+            // Zba: address generation (W variants — zero-extend rs1 to 32 bits, add rs2)
             (2, 0x10) => {
-                let r2_zext = cpu.regs[inst.rs2] as u32 as u64;
-                cpu.regs[inst.rs1].wrapping_add(r2_zext << 1) // SH1ADD.UW
+                let r1_zext = cpu.regs[inst.rs1] as u32 as u64;
+                (r1_zext << 1).wrapping_add(cpu.regs[inst.rs2]) // SH1ADD.UW
             }
             (4, 0x10) => {
-                let r2_zext = cpu.regs[inst.rs2] as u32 as u64;
-                cpu.regs[inst.rs1].wrapping_add(r2_zext << 2) // SH2ADD.UW
+                let r1_zext = cpu.regs[inst.rs1] as u32 as u64;
+                (r1_zext << 2).wrapping_add(cpu.regs[inst.rs2]) // SH2ADD.UW
             }
             (6, 0x10) => {
-                let r2_zext = cpu.regs[inst.rs2] as u32 as u64;
-                cpu.regs[inst.rs1].wrapping_add(r2_zext << 3) // SH3ADD.UW
+                let r1_zext = cpu.regs[inst.rs1] as u32 as u64;
+                (r1_zext << 3).wrapping_add(cpu.regs[inst.rs2]) // SH3ADD.UW
             }
-            (0, 0x04) => (cpu.regs[inst.rs2] as u32 as u64).wrapping_add(cpu.regs[inst.rs1]), // ADD.UW (Zba)
+            (0, 0x04) => (cpu.regs[inst.rs1] as u32 as u64).wrapping_add(cpu.regs[inst.rs2]), // ADD.UW (Zba)
             // Zbb: 32-bit rotate
             (1, 0x30) => rs1.rotate_left(rs2 & 0x1F) as i32 as i64 as u64, // ROLW
             (5, 0x30) => rs1.rotate_right(rs2 & 0x1F) as i32 as i64 as u64, // RORW

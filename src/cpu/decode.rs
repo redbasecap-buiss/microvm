@@ -83,7 +83,8 @@ pub fn expand_compressed(inst: u32) -> u32 {
             1 => expand_c_fld(inst), // C.FLD
             2 => expand_c_lw(inst),
             3 => expand_c_ld(inst),
-            5 => expand_c_fsd(inst), // C.FSD
+            4 => expand_zcb_load_store(inst), // Zcb: C.LBU, C.LHU, C.LH, C.SB, C.SH
+            5 => expand_c_fsd(inst),          // C.FSD
             6 => expand_c_sw(inst),
             7 => expand_c_sd(inst),
             _ => 0,
@@ -250,6 +251,41 @@ fn expand_c_alu(inst: u32) -> u32 {
                 (0, 3) => (rs2 << 20) | (rd << 15) | (7 << 12) | (rd << 7) | 0x33,      // C.AND
                 (1, 0) => ((0x20 << 25) | (rs2 << 20) | (rd << 15)) | (rd << 7) | 0x3B, // C.SUBW
                 (1, 1) => ((rs2 << 20) | (rd << 15)) | (rd << 7) | 0x3B,                // C.ADDW
+                (1, 2) => {
+                    // C.MUL (Zcb): MUL rd', rd', rs2'
+                    (0x01 << 25) | (rs2 << 20) | (rd << 15) | (rd << 7) | 0x33
+                }
+                (1, 3) => {
+                    // Zcb unary ops: distinguished by bits[4:2]
+                    let funct3_low = (inst >> 2) & 0x7;
+                    match funct3_low {
+                        0 => {
+                            // C.ZEXT.B: ANDI rd', rd', 0xFF
+                            (0xFF << 20) | (rd << 15) | (7 << 12) | (rd << 7) | 0x13
+                        }
+                        1 => {
+                            // C.SEXT.B: sext.b rd' → funct7=0x30, funct3=1, rs2=4
+                            (0x30 << 25) | (0x04 << 20) | (rd << 15) | (1 << 12) | (rd << 7) | 0x13
+                        }
+                        2 => {
+                            // C.ZEXT.H: zext.h rd' → funct7=0x04, funct3=4, rs2=0, opcode=0x3B (RV64)
+                            (0x04 << 25) | (rd << 15) | (4 << 12) | (rd << 7) | 0x3B
+                        }
+                        3 => {
+                            // C.SEXT.H: sext.h rd' → funct7=0x30, funct3=1, rs2=5
+                            (0x30 << 25) | (0x05 << 20) | (rd << 15) | (1 << 12) | (rd << 7) | 0x13
+                        }
+                        4 => {
+                            // C.ZEXT.W (RV64): add.uw rd', rd', x0 → funct7=0x04, opcode=0x3B
+                            (0x04 << 25) | (rd << 15) | (rd << 7) | 0x3B
+                        }
+                        5 => {
+                            // C.NOT: XORI rd', rd', -1
+                            (0xFFF << 20) | (rd << 15) | (4 << 12) | (rd << 7) | 0x13
+                        }
+                        _ => 0,
+                    }
+                }
                 _ => 0,
             }
         }
@@ -365,6 +401,53 @@ fn expand_c_sdsp(inst: u32) -> u32 {
     let imm11_5 = (offset >> 5) & 0x7F;
     let imm4_0 = offset & 0x1F;
     (imm11_5 << 25) | (rs2 << 20) | (2 << 15) | (3 << 12) | (imm4_0 << 7) | 0x23
+}
+
+// === Zcb: Compressed byte/halfword load/store (quadrant 0, funct3=4) ===
+
+/// Expand Zcb load/store instructions to their 32-bit equivalents
+fn expand_zcb_load_store(inst: u32) -> u32 {
+    let rs1 = c_rs1_prime(inst);
+    let rd_rs2 = c_rd_prime(inst);
+    let funct3_high = (inst >> 10) & 0x7; // bits[12:10]
+
+    match funct3_high {
+        0 => {
+            // C.LBU: LBU rd', uimm(rs1')
+            // uimm[1] = bit[5], uimm[0] = bit[6]
+            let uimm = ((inst >> 5) & 0x1) << 1 | ((inst >> 6) & 0x1);
+            (uimm << 20) | (rs1 << 15) | (4 << 12) | (rd_rs2 << 7) | 0x03
+        }
+        1 => {
+            // uimm[1] = bit[5], uimm[0] = 0 (halfword aligned)
+            let uimm = ((inst >> 5) & 0x1) << 1;
+            let bit6 = (inst >> 6) & 0x1;
+            if bit6 == 0 {
+                // C.LHU: LHU rd', uimm(rs1')
+                (uimm << 20) | (rs1 << 15) | (5 << 12) | (rd_rs2 << 7) | 0x03
+            } else {
+                // C.LH: LH rd', uimm(rs1')
+                (uimm << 20) | (rs1 << 15) | (1 << 12) | (rd_rs2 << 7) | 0x03
+            }
+        }
+        2 => {
+            // C.SB: SB rs2', uimm(rs1')
+            // uimm[1] = bit[5], uimm[0] = bit[6]
+            let uimm = ((inst >> 5) & 0x1) << 1 | ((inst >> 6) & 0x1);
+            let imm11_5 = (uimm >> 5) & 0x7F;
+            let imm4_0 = uimm & 0x1F;
+            (imm11_5 << 25) | (rd_rs2 << 20) | (rs1 << 15) | (imm4_0 << 7) | 0x23
+        }
+        3 => {
+            // C.SH: SH rs2', uimm(rs1')
+            // uimm[1] = bit[5], uimm[0] = 0
+            let uimm = ((inst >> 5) & 0x1) << 1;
+            let imm11_5 = (uimm >> 5) & 0x7F;
+            let imm4_0 = uimm & 0x1F;
+            (imm11_5 << 25) | (rd_rs2 << 20) | (rs1 << 15) | (1 << 12) | (imm4_0 << 7) | 0x23
+        }
+        _ => 0,
+    }
 }
 
 // === Compressed floating-point instructions (RV64DC) ===

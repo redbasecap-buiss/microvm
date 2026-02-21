@@ -7133,3 +7133,254 @@ fn test_vluxei32_indexed_load() {
         assert_eq!(got, *expected, "vluxei32 elem {i}");
     }
 }
+
+// ============== Zcb Extension Tests ==============
+
+/// Helper to encode Zcb C.LBU: funct3=4, bits[12:10]=0, rs1'=r1-8, rd'=rd-8
+/// uimm[1]=bit[5], uimm[0]=bit[6]
+fn zcb_c_lbu(rd: u16, rs1: u16, uimm: u16) -> u16 {
+    let rd_p = (rd - 8) & 0x7;
+    let rs1_p = (rs1 - 8) & 0x7;
+    let bit5 = (uimm >> 1) & 1;
+    let bit6 = uimm & 1;
+    (0b100 << 13) | (0b000 << 10) | (rs1_p << 7) | (bit5 << 5) | (bit6 << 6) | (rd_p << 2) | 0b00
+}
+
+/// Helper to encode Zcb C.LHU: funct3=4, bits[12:10]=1, bit[6]=0
+fn zcb_c_lhu(rd: u16, rs1: u16, uimm: u16) -> u16 {
+    let rd_p = (rd - 8) & 0x7;
+    let rs1_p = (rs1 - 8) & 0x7;
+    let bit5 = (uimm >> 1) & 1;
+    (0b100 << 13) | (0b001 << 10) | (rs1_p << 7) | (bit5 << 5) | (rd_p << 2) | 0b00
+}
+
+/// Helper to encode Zcb C.LH: funct3=4, bits[12:10]=1, bit[6]=1
+fn zcb_c_lh(rd: u16, rs1: u16, uimm: u16) -> u16 {
+    let rd_p = (rd - 8) & 0x7;
+    let rs1_p = (rs1 - 8) & 0x7;
+    let bit5 = (uimm >> 1) & 1;
+    (0b100 << 13) | (0b001 << 10) | (rs1_p << 7) | (1 << 6) | (bit5 << 5) | (rd_p << 2) | 0b00
+}
+
+/// Helper to encode Zcb C.SB: funct3=4, bits[12:10]=2
+fn zcb_c_sb(rs2: u16, rs1: u16, uimm: u16) -> u16 {
+    let rs2_p = (rs2 - 8) & 0x7;
+    let rs1_p = (rs1 - 8) & 0x7;
+    let bit5 = (uimm >> 1) & 1;
+    let bit6 = uimm & 1;
+    (0b100 << 13) | (0b010 << 10) | (rs1_p << 7) | (bit5 << 5) | (bit6 << 6) | (rs2_p << 2) | 0b00
+}
+
+/// Helper to encode Zcb C.SH: funct3=4, bits[12:10]=3, bit[6]=0
+fn zcb_c_sh(rs2: u16, rs1: u16, uimm: u16) -> u16 {
+    let rs2_p = (rs2 - 8) & 0x7;
+    let rs1_p = (rs1 - 8) & 0x7;
+    let bit5 = (uimm >> 1) & 1;
+    (0b100 << 13) | (0b011 << 10) | (rs1_p << 7) | (bit5 << 5) | (rs2_p << 2) | 0b00
+}
+
+/// Helper: CU-format unary instruction (c.zext.b, c.sext.b, etc.)
+/// funct3=100, bits[12:10]=111, bits[6:5]=11, bits[4:2]=funct_code
+fn zcb_cu(rd: u16, funct_code: u16) -> u16 {
+    let rd_p = (rd - 8) & 0x7;
+    (0b100 << 13) | (0b111 << 10) | (rd_p << 7) | (0b11 << 5) | (funct_code << 2) | 0b01
+}
+
+/// Helper: C.MUL: funct3=100, bits[12:10]=111, bits[6:5]=10
+fn zcb_c_mul(rd: u16, rs2: u16) -> u16 {
+    let rd_p = (rd - 8) & 0x7;
+    let rs2_p = (rs2 - 8) & 0x7;
+    (0b100 << 13) | (0b111 << 10) | (rd_p << 7) | (0b10 << 5) | (rs2_p << 2) | 0b01
+}
+
+/// Run a program with 16-bit (compressed) instructions
+fn run_compressed_program(
+    c_instrs: &[u16],
+    steps: usize,
+    regs: &[(usize, u64)],
+    memory: &[(u64, &[u8])],
+) -> (Cpu, Bus) {
+    let mut bus = Bus::new(64 * 1024);
+    // Pack 16-bit instructions as bytes
+    let bytes: Vec<u8> = c_instrs.iter().flat_map(|i| i.to_le_bytes()).collect();
+    bus.load_binary(&bytes, 0);
+    // Write memory
+    for (offset, data) in memory {
+        bus.load_binary(data, *offset);
+    }
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+    for &(reg, val) in regs {
+        cpu.regs[reg] = val;
+    }
+    for _ in 0..steps {
+        if !cpu.step(&mut bus) {
+            break;
+        }
+    }
+    (cpu, bus)
+}
+
+#[test]
+fn test_zcb_c_lbu() {
+    // Store bytes at data area (offset 1024 from DRAM_BASE)
+    let data_offset = 1024u64;
+    let data: [u8; 4] = [0xAB, 0xCD, 0xEF, 0x12];
+    // C.LBU x8, 0(x9) → load byte at x9+0 into x8
+    let c_lbu_0 = zcb_c_lbu(8, 9, 0);
+    // C.LBU x10, 1(x9) → load byte at x9+1 into x10
+    let c_lbu_1 = zcb_c_lbu(10, 9, 1);
+    // C.LBU x11, 2(x9) → load byte at x9+2 into x11
+    let c_lbu_2 = zcb_c_lbu(11, 9, 2);
+    // C.LBU x12, 3(x9) → load byte at x9+3 into x12
+    let c_lbu_3 = zcb_c_lbu(12, 9, 3);
+
+    let (cpu, _) = run_compressed_program(
+        &[c_lbu_0, c_lbu_1, c_lbu_2, c_lbu_3],
+        4,
+        &[(9, DRAM_BASE + data_offset)],
+        &[(data_offset, &data)],
+    );
+    assert_eq!(cpu.regs[8], 0xAB, "c.lbu offset 0");
+    assert_eq!(cpu.regs[10], 0xCD, "c.lbu offset 1");
+    assert_eq!(cpu.regs[11], 0xEF, "c.lbu offset 2");
+    assert_eq!(cpu.regs[12], 0x12, "c.lbu offset 3");
+}
+
+#[test]
+fn test_zcb_c_lhu() {
+    let data_offset = 1024u64;
+    let data: [u8; 4] = [0xAB, 0xCD, 0xEF, 0x12];
+    let c_lhu_0 = zcb_c_lhu(8, 9, 0);
+    let c_lhu_2 = zcb_c_lhu(10, 9, 2);
+
+    let (cpu, _) = run_compressed_program(
+        &[c_lhu_0, c_lhu_2],
+        2,
+        &[(9, DRAM_BASE + data_offset)],
+        &[(data_offset, &data)],
+    );
+    assert_eq!(cpu.regs[8], 0xCDAB, "c.lhu offset 0");
+    assert_eq!(cpu.regs[10], 0x12EF, "c.lhu offset 2");
+}
+
+#[test]
+fn test_zcb_c_lh_sign_extend() {
+    let data_offset = 1024u64;
+    let data: [u8; 2] = [0x00, 0x80]; // 0x8000 → sign-extends to -32768
+    let c_lh = zcb_c_lh(8, 9, 0);
+
+    let (cpu, _) = run_compressed_program(
+        &[c_lh],
+        1,
+        &[(9, DRAM_BASE + data_offset)],
+        &[(data_offset, &data)],
+    );
+    assert_eq!(cpu.regs[8] as i64, -32768i64, "c.lh sign extension");
+}
+
+#[test]
+fn test_zcb_c_sb() {
+    let data_offset = 1024u64;
+    let c_sb_0 = zcb_c_sb(8, 9, 0);
+    let c_sb_1 = zcb_c_sb(10, 9, 1);
+
+    let (_, mut bus) = run_compressed_program(
+        &[c_sb_0, c_sb_1],
+        2,
+        &[(8, 0x42), (9, DRAM_BASE + data_offset), (10, 0xFF)],
+        &[],
+    );
+    assert_eq!(bus.read8(DRAM_BASE + data_offset), 0x42, "c.sb offset 0");
+    assert_eq!(
+        bus.read8(DRAM_BASE + data_offset + 1),
+        0xFF,
+        "c.sb offset 1"
+    );
+}
+
+#[test]
+fn test_zcb_c_sh() {
+    let data_offset = 1024u64;
+    let c_sh = zcb_c_sh(8, 9, 0);
+
+    let (_, mut bus) = run_compressed_program(
+        &[c_sh],
+        1,
+        &[(8, 0xBEEF), (9, DRAM_BASE + data_offset)],
+        &[],
+    );
+    assert_eq!(bus.read16(DRAM_BASE + data_offset), 0xBEEF, "c.sh");
+}
+
+#[test]
+fn test_zcb_c_zext_b() {
+    let c_zext_b = zcb_cu(8, 0);
+    let (cpu, _) = run_compressed_program(&[c_zext_b], 1, &[(8, 0xFFFF_FFFF_FFFF_FF42)], &[]);
+    assert_eq!(cpu.regs[8], 0x42, "c.zext.b");
+}
+
+#[test]
+fn test_zcb_c_sext_b() {
+    let c_sext_b = zcb_cu(8, 1);
+    let (cpu, _) = run_compressed_program(&[c_sext_b], 1, &[(8, 0x80)], &[]);
+    assert_eq!(cpu.regs[8] as i64, -128, "c.sext.b");
+}
+
+#[test]
+fn test_zcb_c_zext_h() {
+    let c_zext_h = zcb_cu(8, 2);
+    let (cpu, _) = run_compressed_program(&[c_zext_h], 1, &[(8, 0xFFFF_FFFF_FFFF_BEEF)], &[]);
+    assert_eq!(cpu.regs[8], 0xBEEF, "c.zext.h");
+}
+
+#[test]
+fn test_zcb_c_sext_h() {
+    let c_sext_h = zcb_cu(8, 3);
+    let (cpu, _) = run_compressed_program(&[c_sext_h], 1, &[(8, 0x8000)], &[]);
+    assert_eq!(cpu.regs[8] as i64, -32768, "c.sext.h");
+}
+
+#[test]
+fn test_zcb_c_zext_w() {
+    let c_zext_w = zcb_cu(8, 4);
+    let (cpu, _) = run_compressed_program(&[c_zext_w], 1, &[(8, 0xFFFF_FFFF_DEAD_BEEF)], &[]);
+    assert_eq!(cpu.regs[8], 0xDEAD_BEEF, "c.zext.w");
+}
+
+#[test]
+fn test_zcb_c_not() {
+    let c_not = zcb_cu(8, 5);
+    let (cpu, _) = run_compressed_program(&[c_not], 1, &[(8, 0)], &[]);
+    assert_eq!(cpu.regs[8], u64::MAX, "c.not");
+}
+
+#[test]
+fn test_zcb_c_mul() {
+    let c_mul = zcb_c_mul(8, 9);
+    let (cpu, _) = run_compressed_program(&[c_mul], 1, &[(8, 7), (9, 6)], &[]);
+    assert_eq!(cpu.regs[8], 42, "c.mul");
+}
+
+// ============== ADD.UW / SH*ADD.UW bugfix tests ==============
+
+#[test]
+fn test_add_uw() {
+    // ADD.UW x1, x2, x3: x1 = ZEXT.W(x2) + x3
+    // funct7=0x04, funct3=0, opcode=0x3B
+    let inst = (0x04 << 25) | (3 << 20) | (2 << 15) | (0 << 12) | (1 << 7) | 0x3B;
+    let (cpu, _) = run_program_with_regs(&[inst], 1, &[(2, 0xFFFF_FFFF_DEAD_BEEFu64), (3, 0x100)]);
+    // Should be ZEXT.W(0xFFFF_FFFF_DEAD_BEEF) + 0x100 = 0xDEAD_BEEF + 0x100 = 0xDEAD_BFEF
+    assert_eq!(cpu.regs[1], 0xDEAD_BEEF + 0x100, "add.uw");
+}
+
+#[test]
+fn test_sh1add_uw() {
+    // SH1ADD.UW x1, x2, x3: x1 = (ZEXT.W(x2) << 1) + x3
+    // funct7=0x10, funct3=2, opcode=0x3B
+    let inst = (0x10 << 25) | (3 << 20) | (2 << 15) | (2 << 12) | (1 << 7) | 0x3B;
+    let (cpu, _) = run_program_with_regs(&[inst], 1, &[(2, 0xFFFF_FFFF_0000_0010u64), (3, 0x100)]);
+    // ZEXT.W(0xFFFF_FFFF_0000_0010) = 0x0000_0010, << 1 = 0x20, + 0x100 = 0x120
+    assert_eq!(cpu.regs[1], 0x120, "sh1add.uw");
+}

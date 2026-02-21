@@ -439,6 +439,7 @@ pub fn generate_dtb_smp(
         "zfa",
         "zimop",
         "zcmop",
+        "zcb",
         "v",
         "zve32f",
         "zve64f",
