@@ -8770,3 +8770,541 @@ fn test_vfmv_f_s() {
     // f5 should have NaN-boxed f32
     assert_eq!(cpu.fregs[5] & 0xFFFFFFFF, pi_bits as u64);
 }
+
+// ============================================================================
+// Fixed-point vector instructions: vsmul, vssrl, vssra, vnclipu, vnclip
+// ============================================================================
+
+#[test]
+fn test_vsmul_vv() {
+    // vsmul.vv: signed saturating fractional multiply
+    // For SEW=32: result = (vs2 * vs1) >> 31
+    let mut bus = Bus::new(64 * 1024);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    // vsetvli t0, 1, e32
+    let set = vsetvli(5, 1, 0b0_0_010_000);
+    bus.write32(DRAM_BASE, set);
+    cpu.regs[1] = 1;
+    cpu.step(&mut bus);
+
+    // Set vxrm = 0 (round to nearest up)
+    cpu.csrs.write_raw(csr::VXRM, 0);
+
+    // v2[0] = 0x40000000 (0.5 in Q31 format)
+    // v3[0] = 0x40000000 (0.5 in Q31 format)
+    // Expected: 0.5 * 0.5 = 0.25 → 0x20000000
+    cpu.vregs.write_elem(2, 32, 0, 0x40000000);
+    cpu.vregs.write_elem(3, 32, 0, 0x40000000);
+
+    let inst = opivv(0b100111, 4, 3, 2, 1); // vsmul.vv v4, v2, v3
+    bus.write32(DRAM_BASE + 4, inst);
+    cpu.step(&mut bus);
+
+    let result = cpu.vregs.read_elem(4, 32, 0);
+    assert_eq!(result, 0x20000000, "0.5 * 0.5 in Q31 should be 0.25");
+}
+
+#[test]
+fn test_vsmul_saturation() {
+    // vsmul with INT_MIN * INT_MIN → saturates to INT_MAX
+    let mut bus = Bus::new(64 * 1024);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    cpu.regs[1] = 1;
+    let set = vsetvli(5, 1, 0b0_0_010_000); // e32
+    bus.write32(DRAM_BASE, set);
+    cpu.step(&mut bus);
+    cpu.csrs.write_raw(csr::VXRM, 0);
+
+    // 0x80000000 = INT32_MIN, multiply by itself should saturate
+    cpu.vregs.write_elem(2, 32, 0, 0x80000000);
+    cpu.vregs.write_elem(3, 32, 0, 0x80000000);
+
+    let inst = opivv(0b100111, 4, 3, 2, 1);
+    bus.write32(DRAM_BASE + 4, inst);
+    cpu.step(&mut bus);
+
+    let result = cpu.vregs.read_elem(4, 32, 0);
+    assert_eq!(
+        result, 0x7FFFFFFF,
+        "INT_MIN * INT_MIN should saturate to INT_MAX"
+    );
+    assert_ne!(cpu.csrs.read(csr::VXSAT) & 1, 0, "vxsat should be set");
+}
+
+#[test]
+fn test_vssrl_vv() {
+    // vssrl: scaling shift right logical with rounding
+    let mut bus = Bus::new(64 * 1024);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    cpu.regs[1] = 1;
+    let set = vsetvli(5, 1, 0b0_0_010_000); // e32
+    bus.write32(DRAM_BASE, set);
+    cpu.step(&mut bus);
+
+    // vxrm = 0 (round nearest, ties up)
+    cpu.csrs.write_raw(csr::VXRM, 0);
+
+    // 7 >> 1 with rounding = 4 (7 = 0b111, bit shifted out is 1 → round up: 3+1=4)
+    cpu.vregs.write_elem(2, 32, 0, 7);
+    cpu.vregs.write_elem(3, 32, 0, 1); // shift by 1
+
+    let inst = opivv(0b101010, 4, 3, 2, 1); // vssrl.vv
+    bus.write32(DRAM_BASE + 4, inst);
+    cpu.step(&mut bus);
+
+    assert_eq!(
+        cpu.vregs.read_elem(4, 32, 0),
+        4,
+        "7 >> 1 with rnu rounding should be 4"
+    );
+}
+
+#[test]
+fn test_vssra_vv() {
+    // vssra: scaling shift right arithmetic with rounding
+    let mut bus = Bus::new(64 * 1024);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    cpu.regs[1] = 1;
+    let set = vsetvli(5, 1, 0b0_0_010_000); // e32
+    bus.write32(DRAM_BASE, set);
+    cpu.step(&mut bus);
+    cpu.csrs.write_raw(csr::VXRM, 2); // rdn (truncate) — simplest
+
+    // -8 >> 2 = -2 (arithmetic)
+    cpu.vregs.write_elem(2, 32, 0, (-8i32 as u32) as u64);
+    cpu.vregs.write_elem(3, 32, 0, 2);
+
+    let inst = opivv(0b101011, 4, 3, 2, 1); // vssra.vv
+    bus.write32(DRAM_BASE + 4, inst);
+    cpu.step(&mut bus);
+
+    let result = cpu.vregs.read_elem(4, 32, 0) as u32;
+    assert_eq!(result as i32, -2, "-8 >> 2 arithmetic should be -2");
+}
+
+#[test]
+fn test_vnclipu_wv() {
+    // vnclipu: narrowing clip unsigned (2*SEW → SEW)
+    let mut bus = Bus::new(64 * 1024);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    cpu.regs[1] = 1;
+    // SEW=16, so vs2 is 32-bit, result is 16-bit
+    let set = vsetvli(5, 1, 0b0_0_001_000); // e16
+    bus.write32(DRAM_BASE, set);
+    cpu.step(&mut bus);
+    cpu.csrs.write_raw(csr::VXRM, 2); // rdn
+
+    // vs2 has 32-bit value 0x00020000 (131072), shift right by 0 → clip to u16 max (65535)
+    cpu.vregs.write_elem(2, 32, 0, 0x00020000);
+    cpu.vregs.write_elem(3, 16, 0, 0); // shift = 0
+
+    let inst = opivv(0b101110, 4, 3, 2, 1); // vnclipu.wv
+    bus.write32(DRAM_BASE + 4, inst);
+    cpu.step(&mut bus);
+
+    let result = cpu.vregs.read_elem(4, 16, 0);
+    assert_eq!(result, 0xFFFF, "vnclipu should saturate to u16 max");
+    assert_ne!(cpu.csrs.read(csr::VXSAT) & 1, 0, "vxsat should be set");
+}
+
+#[test]
+fn test_vnclip_wv() {
+    // vnclip: narrowing clip signed (2*SEW → SEW)
+    let mut bus = Bus::new(64 * 1024);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    cpu.regs[1] = 1;
+    // SEW=16, vs2 is 32-bit signed, result is 16-bit signed
+    let set = vsetvli(5, 1, 0b0_0_001_000); // e16
+    bus.write32(DRAM_BASE, set);
+    cpu.step(&mut bus);
+    cpu.csrs.write_raw(csr::VXRM, 2); // rdn
+
+    // vs2 has 32-bit value 0x00010000 (65536), shift=0 → clip to i16 max (32767)
+    cpu.vregs.write_elem(2, 32, 0, 0x00010000);
+    cpu.vregs.write_elem(3, 16, 0, 0); // shift = 0
+
+    let inst = opivv(0b101111, 4, 3, 2, 1); // vnclip.wv
+    bus.write32(DRAM_BASE + 4, inst);
+    cpu.step(&mut bus);
+
+    let result = cpu.vregs.read_elem(4, 16, 0);
+    assert_eq!(result, 0x7FFF, "vnclip should clamp to i16 max");
+    assert_ne!(
+        cpu.csrs.read(csr::VXSAT) & 1,
+        0,
+        "vxsat should be set on clip"
+    );
+}
+
+#[test]
+fn test_vssrl_vi() {
+    // vssrl.vi with immediate shift amount
+    let mut bus = Bus::new(64 * 1024);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    cpu.regs[1] = 1;
+    let set = vsetvli(5, 1, 0b0_0_010_000); // e32
+    bus.write32(DRAM_BASE, set);
+    cpu.step(&mut bus);
+    cpu.csrs.write_raw(csr::VXRM, 0); // rnu
+
+    // 15 >> 2 with rounding: 15=0b1111, shift 2 → 3, bit shifted out = 1 → 3+1=4
+    cpu.vregs.write_elem(2, 32, 0, 15);
+
+    let inst = opivi(0b101010, 4, 2, 2, 1); // vssrl.vi v4, v2, 2
+    bus.write32(DRAM_BASE + 4, inst);
+    cpu.step(&mut bus);
+
+    assert_eq!(
+        cpu.vregs.read_elem(4, 32, 0),
+        4,
+        "15 >> 2 with rnu should be 4"
+    );
+}
+
+// ============================================================================
+// Widening FP vector instructions
+// ============================================================================
+
+#[test]
+fn test_vfwadd_vv() {
+    // vfwadd.vv: f32 + f32 → f64
+    let mut bus = Bus::new(64 * 1024);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    cpu.regs[1] = 1;
+    let set = vsetvli(5, 1, 0b0_0_010_000); // e32 (SEW=32, so result is f64)
+    bus.write32(DRAM_BASE, set);
+    cpu.step(&mut bus);
+
+    let a = 1.5f32.to_bits() as u64;
+    let b = 2.5f32.to_bits() as u64;
+    cpu.vregs.write_elem(2, 32, 0, a);
+    cpu.vregs.write_elem(3, 32, 0, b);
+
+    let inst = opfvv(0b110000, 4, 3, 2, 1); // vfwadd.vv v4, v2, v3
+    bus.write32(DRAM_BASE + 4, inst);
+    cpu.step(&mut bus);
+
+    let result = f64::from_bits(cpu.vregs.read_elem(4, 64, 0));
+    assert!(
+        (result - 4.0).abs() < 1e-10,
+        "1.5 + 2.5 = {result}, expected 4.0"
+    );
+}
+
+#[test]
+fn test_vfwsub_vv() {
+    let mut bus = Bus::new(64 * 1024);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    cpu.regs[1] = 1;
+    let set = vsetvli(5, 1, 0b0_0_010_000);
+    bus.write32(DRAM_BASE, set);
+    cpu.step(&mut bus);
+
+    let a = 5.0f32.to_bits() as u64;
+    let b = 3.0f32.to_bits() as u64;
+    cpu.vregs.write_elem(2, 32, 0, a);
+    cpu.vregs.write_elem(3, 32, 0, b);
+
+    let inst = opfvv(0b110010, 4, 3, 2, 1); // vfwsub.vv
+    bus.write32(DRAM_BASE + 4, inst);
+    cpu.step(&mut bus);
+
+    let result = f64::from_bits(cpu.vregs.read_elem(4, 64, 0));
+    assert!(
+        (result - 2.0).abs() < 1e-10,
+        "5.0 - 3.0 = {result}, expected 2.0"
+    );
+}
+
+#[test]
+fn test_vfwmul_vv() {
+    let mut bus = Bus::new(64 * 1024);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    cpu.regs[1] = 1;
+    let set = vsetvli(5, 1, 0b0_0_010_000);
+    bus.write32(DRAM_BASE, set);
+    cpu.step(&mut bus);
+
+    let a = 3.0f32.to_bits() as u64;
+    let b = 4.0f32.to_bits() as u64;
+    cpu.vregs.write_elem(2, 32, 0, a);
+    cpu.vregs.write_elem(3, 32, 0, b);
+
+    let inst = opfvv(0b111000, 4, 3, 2, 1); // vfwmul.vv
+    bus.write32(DRAM_BASE + 4, inst);
+    cpu.step(&mut bus);
+
+    let result = f64::from_bits(cpu.vregs.read_elem(4, 64, 0));
+    assert!(
+        (result - 12.0).abs() < 1e-10,
+        "3.0 * 4.0 = {result}, expected 12.0"
+    );
+}
+
+#[test]
+fn test_vfwadd_wv() {
+    // vfwadd.wv: f64(vs2) + f32(vs1) → f64
+    let mut bus = Bus::new(64 * 1024);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    cpu.regs[1] = 1;
+    let set = vsetvli(5, 1, 0b0_0_010_000); // e32
+    bus.write32(DRAM_BASE, set);
+    cpu.step(&mut bus);
+
+    // vs2 has f64 10.0, vs1 has f32 2.5
+    cpu.vregs.write_elem(2, 64, 0, 10.0f64.to_bits());
+    cpu.vregs.write_elem(3, 32, 0, 2.5f32.to_bits() as u64);
+
+    let inst = opfvv(0b110100, 4, 3, 2, 1); // vfwadd.wv
+    bus.write32(DRAM_BASE + 4, inst);
+    cpu.step(&mut bus);
+
+    let result = f64::from_bits(cpu.vregs.read_elem(4, 64, 0));
+    assert!(
+        (result - 12.5).abs() < 1e-10,
+        "10.0 + 2.5 = {result}, expected 12.5"
+    );
+}
+
+#[test]
+fn test_vfwmacc_vv() {
+    // vfwmacc.vv: vd(f64) += f32(vs2) * f32(vs1)
+    let mut bus = Bus::new(64 * 1024);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    cpu.regs[1] = 1;
+    let set = vsetvli(5, 1, 0b0_0_010_000);
+    bus.write32(DRAM_BASE, set);
+    cpu.step(&mut bus);
+
+    // vd = 100.0 (f64), vs2 = 3.0 (f32), vs1 = 5.0 (f32)
+    // Result: 100.0 + 3.0 * 5.0 = 115.0
+    cpu.vregs.write_elem(4, 64, 0, 100.0f64.to_bits());
+    cpu.vregs.write_elem(2, 32, 0, 3.0f32.to_bits() as u64);
+    cpu.vregs.write_elem(3, 32, 0, 5.0f32.to_bits() as u64);
+
+    let inst = opfvv(0b111100, 4, 3, 2, 1); // vfwmacc.vv
+    bus.write32(DRAM_BASE + 4, inst);
+    cpu.step(&mut bus);
+
+    let result = f64::from_bits(cpu.vregs.read_elem(4, 64, 0));
+    assert!(
+        (result - 115.0).abs() < 1e-10,
+        "100 + 3*5 = {result}, expected 115.0"
+    );
+}
+
+#[test]
+fn test_vfwcvt_f_f() {
+    // vfwcvt.f.f.v: f32 → f64
+    let mut bus = Bus::new(64 * 1024);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    cpu.regs[1] = 1;
+    let set = vsetvli(5, 1, 0b0_0_010_000);
+    bus.write32(DRAM_BASE, set);
+    cpu.step(&mut bus);
+
+    cpu.vregs.write_elem(2, 32, 0, 3.14f32.to_bits() as u64);
+
+    // funct6=0b010010, vs1=0b01100 (vfwcvt.f.f.v)
+    let inst = opfvv(0b010010, 4, 0b01100, 2, 1);
+    bus.write32(DRAM_BASE + 4, inst);
+    cpu.step(&mut bus);
+
+    let result = f64::from_bits(cpu.vregs.read_elem(4, 64, 0));
+    assert!(
+        (result - 3.14f32 as f64).abs() < 1e-6,
+        "vfwcvt.f.f: {result}"
+    );
+}
+
+#[test]
+fn test_vfncvt_f_f() {
+    // vfncvt.f.f.w: f64 → f32
+    let mut bus = Bus::new(64 * 1024);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    cpu.regs[1] = 1;
+    let set = vsetvli(5, 1, 0b0_0_010_000); // SEW=32 (destination)
+    bus.write32(DRAM_BASE, set);
+    cpu.step(&mut bus);
+
+    // vs2 has f64 2.718281828
+    cpu.vregs.write_elem(2, 64, 0, 2.718281828f64.to_bits());
+
+    // funct6=0b010010, vs1=0b11100 (vfncvt.f.f.w)
+    let inst = opfvv(0b010010, 4, 0b11100, 2, 1);
+    bus.write32(DRAM_BASE + 4, inst);
+    cpu.step(&mut bus);
+
+    let result = f32::from_bits(cpu.vregs.read_elem(4, 32, 0) as u32);
+    assert!(
+        (result - 2.718281828f64 as f32).abs() < 1e-6,
+        "vfncvt.f.f: {result}"
+    );
+}
+
+#[test]
+fn test_vfwadd_vf() {
+    // vfwadd.vf: f32(vs2) + f32(scalar) → f64
+    let mut bus = Bus::new(64 * 1024);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    cpu.regs[1] = 1;
+    let set = vsetvli(5, 1, 0b0_0_010_000);
+    bus.write32(DRAM_BASE, set);
+    cpu.step(&mut bus);
+
+    cpu.vregs.write_elem(2, 32, 0, 7.0f32.to_bits() as u64);
+    // NaN-box the f32 scalar in fregs
+    cpu.fregs[10] = 0xFFFFFFFF_00000000 | (3.0f32.to_bits() as u64);
+
+    let inst = opfvf(0b110000, 4, 10, 2, 1); // vfwadd.vf
+    bus.write32(DRAM_BASE + 4, inst);
+    cpu.step(&mut bus);
+
+    let result = f64::from_bits(cpu.vregs.read_elem(4, 64, 0));
+    assert!(
+        (result - 10.0).abs() < 1e-10,
+        "7.0 + 3.0 = {result}, expected 10.0"
+    );
+}
+
+#[test]
+fn test_vfwredusum() {
+    // vfwredusum: widening unordered FP sum reduction (f32→f64)
+    let mut bus = Bus::new(64 * 1024);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    cpu.regs[1] = 4; // vl=4
+    let set = vsetvli(5, 1, 0b0_0_010_000); // e32
+    bus.write32(DRAM_BASE, set);
+    cpu.step(&mut bus);
+
+    // vs2 has 4 f32 values: 1.0, 2.0, 3.0, 4.0
+    cpu.vregs.write_elem(2, 32, 0, 1.0f32.to_bits() as u64);
+    cpu.vregs.write_elem(2, 32, 1, 2.0f32.to_bits() as u64);
+    cpu.vregs.write_elem(2, 32, 2, 3.0f32.to_bits() as u64);
+    cpu.vregs.write_elem(2, 32, 3, 4.0f32.to_bits() as u64);
+    // vs1[0] has f64 initial accumulator = 0.0
+    cpu.vregs.write_elem(3, 64, 0, 0.0f64.to_bits());
+
+    let inst = opfvv(0b110001, 4, 3, 2, 1); // vfwredusum
+    bus.write32(DRAM_BASE + 4, inst);
+    cpu.step(&mut bus);
+
+    let result = f64::from_bits(cpu.vregs.read_elem(4, 64, 0));
+    assert!(
+        (result - 10.0).abs() < 1e-10,
+        "sum 1+2+3+4 = {result}, expected 10.0"
+    );
+}
+
+#[test]
+fn test_vfwcvt_f_xu() {
+    // vfwcvt.f.xu.v: uint32 → f64
+    let mut bus = Bus::new(64 * 1024);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    cpu.regs[1] = 1;
+    let set = vsetvli(5, 1, 0b0_0_010_000);
+    bus.write32(DRAM_BASE, set);
+    cpu.step(&mut bus);
+
+    cpu.vregs.write_elem(2, 32, 0, 42);
+
+    let inst = opfvv(0b010010, 4, 0b01010, 2, 1); // vfwcvt.f.xu.v
+    bus.write32(DRAM_BASE + 4, inst);
+    cpu.step(&mut bus);
+
+    let result = f64::from_bits(cpu.vregs.read_elem(4, 64, 0));
+    assert!(
+        (result - 42.0).abs() < 1e-10,
+        "vfwcvt.f.xu: {result}, expected 42.0"
+    );
+}
+
+#[test]
+fn test_vfncvt_x_f() {
+    // vfncvt.x.f.w: f64 → int32
+    let mut bus = Bus::new(64 * 1024);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    cpu.regs[1] = 1;
+    let set = vsetvli(5, 1, 0b0_0_010_000); // SEW=32
+    bus.write32(DRAM_BASE, set);
+    cpu.step(&mut bus);
+
+    cpu.vregs.write_elem(2, 64, 0, (-7.0f64).to_bits());
+
+    let inst = opfvv(0b010010, 4, 0b11001, 2, 1); // vfncvt.x.f.w
+    bus.write32(DRAM_BASE + 4, inst);
+    cpu.step(&mut bus);
+
+    let result = cpu.vregs.read_elem(4, 32, 0) as u32;
+    assert_eq!(result as i32, -7, "vfncvt.x.f: {result}, expected -7");
+}
+
+#[test]
+fn test_disasm_vfixpt() {
+    // Test that vsmul is classified as "vfixpt"
+    use microvm::cpu::disasm::mnemonic;
+    let inst = opivv(0b100111, 4, 3, 2, 1); // vsmul.vv
+    assert_eq!(mnemonic(inst), "vfixpt");
+}
+
+#[test]
+fn test_disasm_vwfpu() {
+    // Test that vfwadd.vv is classified as "vwfpu"
+    use microvm::cpu::disasm::mnemonic;
+    let inst = opfvv(0b110000, 4, 3, 2, 1); // vfwadd.vv
+    assert_eq!(mnemonic(inst), "vwfpu");
+}

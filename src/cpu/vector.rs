@@ -672,6 +672,116 @@ fn fp_sgnjx(sew: u32, a: u64, b: u64) -> u64 {
 }
 
 // ============================================================================
+// Widening FP helpers: SEW→2*SEW (only f32→f64 supported, since VLEN=128, ELEN=64)
+// ============================================================================
+
+/// Widen a f32 value to f64 bits
+fn fp_widen(val: u64) -> u64 {
+    let f = f32::from_bits(val as u32);
+    (f as f64).to_bits()
+}
+
+/// Narrow a f64 value to f32 bits
+#[allow(dead_code)]
+fn fp_narrow(val: u64) -> u64 {
+    let f = f64::from_bits(val);
+    (f as f32).to_bits() as u64
+}
+
+/// Widening FP binary op: read two SEW operands, widen to 2*SEW, apply f64 op
+fn fp_widen_binop(a: u64, b: u64, sew: u32, op: fn(u64, u64) -> u64) -> u64 {
+    if sew == 32 {
+        let wa = fp_widen(a);
+        let wb = fp_widen(b);
+        op(wa, wb)
+    } else {
+        0 // SEW=64 would need f128, not supported
+    }
+}
+
+/// Widening FP: vs2 is already 2*SEW, vs1 is SEW (.wv variant)
+fn fp_widen_w_binop(a_wide: u64, b: u64, sew: u32, op: fn(u64, u64) -> u64) -> u64 {
+    if sew == 32 {
+        let wb = fp_widen(b);
+        op(a_wide, wb)
+    } else {
+        0
+    }
+}
+
+/// Widening FP FMA: all SEW inputs, result in 2*SEW
+fn fp_widen_fma(a: u64, b: u64, c: u64, sew: u32) -> u64 {
+    if sew == 32 {
+        let wa = fp_widen(a);
+        let wb = fp_widen(b);
+        // c is already 2*SEW (f64)
+        fp_fma(64, wa, wb, c)
+    } else {
+        0
+    }
+}
+
+/// Widening FP conversion (vfwcvt): f32→f64
+fn fp_widen_cvt_f(sew: u32, a: u64) -> u64 {
+    if sew == 32 {
+        fp_widen(a)
+    } else {
+        0
+    }
+}
+
+/// Widening int→FP: SEW int → 2*SEW FP
+fn fp_widen_cvt_xu(sew: u32, a: u64) -> u64 {
+    if sew == 32 {
+        let val = trunc_sew(a, sew) as u32;
+        (val as f64).to_bits()
+    } else {
+        0
+    }
+}
+
+fn fp_widen_cvt_x(sew: u32, a: u64) -> u64 {
+    if sew == 32 {
+        let val = sext_sew(a, sew) as i32;
+        (val as f64).to_bits()
+    } else {
+        0
+    }
+}
+
+/// Narrowing FP conversion (vfncvt): f64→f32
+fn fp_narrow_cvt_f(sew: u32, a: u64) -> u64 {
+    // sew is the destination SEW; source is 2*SEW
+    if sew == 32 {
+        fp_narrow(a)
+    } else {
+        0
+    }
+}
+
+/// Narrowing FP→int: 2*SEW FP → SEW int
+fn fp_narrow_cvt_x(sew: u32, a: u64) -> u64 {
+    if sew == 32 {
+        // a is f64, convert to i32
+        let f = f64::from_bits(a);
+        let clamped = f.round().clamp(i32::MIN as f64, i32::MAX as f64) as i32;
+        trunc_sew(clamped as u64, 32)
+    } else {
+        0
+    }
+}
+
+fn fp_narrow_cvt_xu(sew: u32, a: u64) -> u64 {
+    if sew == 32 {
+        let f = f64::from_bits(a);
+        let clamped = f.round().clamp(0.0, u32::MAX as f64) as u32;
+        clamped as u64
+    } else {
+        0
+    }
+}
+
+// ============================================================================
 // OPFVV: vector-vector floating-point (funct3=1)
 // ============================================================================
 fn execute_fvv(cpu: &mut Cpu, ctx: &VCtx) {
@@ -726,6 +836,31 @@ fn execute_fvv(cpu: &mut Cpu, ctx: &VCtx) {
                 }
             }
             cpu.vregs.write_elem(vd, sew, 0, acc);
+        }
+        // Widening FP reductions (SEW→2*SEW)
+        0b110001 => {
+            // vfwredusum: widening unordered FP sum reduction
+            let dsew = sew * 2;
+            let mut acc = cpu.vregs.read_elem(vs1, dsew, 0);
+            for i in 0..vl as usize {
+                if elem_active(cpu, vm, i) {
+                    let widened = fp_widen_cvt_f(sew, cpu.vregs.read_elem(vs2, sew, i));
+                    acc = f64_add(acc, widened);
+                }
+            }
+            cpu.vregs.write_elem(vd, dsew, 0, acc);
+        }
+        0b110011 => {
+            // vfwredosum: widening ordered FP sum reduction
+            let dsew = sew * 2;
+            let mut acc = cpu.vregs.read_elem(vs1, dsew, 0);
+            for i in 0..vl as usize {
+                if elem_active(cpu, vm, i) {
+                    let widened = fp_widen_cvt_f(sew, cpu.vregs.read_elem(vs2, sew, i));
+                    acc = f64_add(acc, widened);
+                }
+            }
+            cpu.vregs.write_elem(vd, dsew, 0, acc);
         }
         0b010000 => {
             // vfmv.f.s: f[rd] = vs2[0]
@@ -793,6 +928,114 @@ fn execute_fvv_elemwise(cpu: &mut Cpu, ctx: &VCtx) {
                     0b10011 => int_to_fp(sew, a),                   // vfcvt.f.x
                     0b10110 => fp_to_uint(sew, a),                  // vfcvt.rtz.xu.f
                     0b10111 => fp_to_int(sew, a),                   // vfcvt.rtz.x.f
+                    // --- Widening FP conversions (vfwcvt, SEW→2*SEW) ---
+                    0b01000 => {
+                        // vfwcvt.xu.f.v: f(SEW) → uint(2*SEW)
+                        let dsew = sew * 2;
+                        let val = fp_to_uint(sew, a);
+                        cpu.vregs.write_elem(vd, dsew, i, trunc_sew(val, dsew));
+                        continue;
+                    }
+                    0b01001 => {
+                        // vfwcvt.x.f.v: f(SEW) → int(2*SEW)
+                        let dsew = sew * 2;
+                        let val = fp_to_int(sew, a);
+                        cpu.vregs.write_elem(
+                            vd,
+                            dsew,
+                            i,
+                            trunc_sew(sext_sew(val, sew) as u64, dsew),
+                        );
+                        continue;
+                    }
+                    0b01010 => {
+                        // vfwcvt.f.xu.v: uint(SEW) → f(2*SEW)
+                        let dsew = sew * 2;
+                        cpu.vregs.write_elem(vd, dsew, i, fp_widen_cvt_xu(sew, a));
+                        continue;
+                    }
+                    0b01011 => {
+                        // vfwcvt.f.x.v: int(SEW) → f(2*SEW)
+                        let dsew = sew * 2;
+                        cpu.vregs.write_elem(vd, dsew, i, fp_widen_cvt_x(sew, a));
+                        continue;
+                    }
+                    0b01100 => {
+                        // vfwcvt.f.f.v: f(SEW) → f(2*SEW)
+                        let dsew = sew * 2;
+                        cpu.vregs.write_elem(vd, dsew, i, fp_widen_cvt_f(sew, a));
+                        continue;
+                    }
+                    0b01110 => {
+                        // vfwcvt.rtz.xu.f.v
+                        let dsew = sew * 2;
+                        cpu.vregs
+                            .write_elem(vd, dsew, i, trunc_sew(fp_to_uint(sew, a), dsew));
+                        continue;
+                    }
+                    0b01111 => {
+                        // vfwcvt.rtz.x.f.v
+                        let dsew = sew * 2;
+                        let val = fp_to_int(sew, a);
+                        cpu.vregs.write_elem(
+                            vd,
+                            dsew,
+                            i,
+                            trunc_sew(sext_sew(val, sew) as u64, dsew),
+                        );
+                        continue;
+                    }
+                    // --- Narrowing FP conversions (vfncvt, 2*SEW→SEW) ---
+                    0b11000 => {
+                        // vfncvt.xu.f.w: f(2*SEW) → uint(SEW)
+                        let wide = cpu.vregs.read_elem(vs2, sew * 2, i);
+                        cpu.vregs
+                            .write_elem(vd, sew, i, fp_narrow_cvt_xu(sew, wide));
+                        continue;
+                    }
+                    0b11001 => {
+                        // vfncvt.x.f.w: f(2*SEW) → int(SEW)
+                        let wide = cpu.vregs.read_elem(vs2, sew * 2, i);
+                        cpu.vregs.write_elem(vd, sew, i, fp_narrow_cvt_x(sew, wide));
+                        continue;
+                    }
+                    0b11010 => {
+                        // vfncvt.f.xu.w: uint(2*SEW) → f(SEW)
+                        let wide = cpu.vregs.read_elem(vs2, sew * 2, i);
+                        cpu.vregs.write_elem(vd, sew, i, uint_to_fp(sew, wide));
+                        continue;
+                    }
+                    0b11011 => {
+                        // vfncvt.f.x.w: int(2*SEW) → f(SEW)
+                        let wide = cpu.vregs.read_elem(vs2, sew * 2, i);
+                        cpu.vregs.write_elem(vd, sew, i, int_to_fp(sew, wide));
+                        continue;
+                    }
+                    0b11100 => {
+                        // vfncvt.f.f.w: f(2*SEW) → f(SEW)
+                        let wide = cpu.vregs.read_elem(vs2, sew * 2, i);
+                        cpu.vregs.write_elem(vd, sew, i, fp_narrow_cvt_f(sew, wide));
+                        continue;
+                    }
+                    0b11101 => {
+                        // vfncvt.rod.f.f.w
+                        let wide = cpu.vregs.read_elem(vs2, sew * 2, i);
+                        cpu.vregs.write_elem(vd, sew, i, fp_narrow_cvt_f(sew, wide));
+                        continue;
+                    }
+                    0b11110 => {
+                        // vfncvt.rtz.xu.f.w
+                        let wide = cpu.vregs.read_elem(vs2, sew * 2, i);
+                        cpu.vregs
+                            .write_elem(vd, sew, i, fp_narrow_cvt_xu(sew, wide));
+                        continue;
+                    }
+                    0b11111 => {
+                        // vfncvt.rtz.x.f.w
+                        let wide = cpu.vregs.read_elem(vs2, sew * 2, i);
+                        cpu.vregs.write_elem(vd, sew, i, fp_narrow_cvt_x(sew, wide));
+                        continue;
+                    }
                     _ => continue,
                 }
             }
@@ -828,6 +1071,80 @@ fn execute_fvv_elemwise(cpu: &mut Cpu, ctx: &VCtx) {
             0b011011 => u64::from(fp_lt(sew, a, b)), // vmflt
             0b011100 => u64::from(!fp_eq(sew, a, b) && !fp_is_nan(sew, a) && !fp_is_nan(sew, b)), // vmfne (ordered)
             0b011101 => u64::from(!fp_le(sew, a, b) && !fp_is_nan(sew, a)), // vmfgt (redundant enc)
+
+            // --- Widening FP ops (SEW→2*SEW) ---
+            0b110000 => {
+                // vfwadd.vv
+                let dsew = sew * 2;
+                cpu.vregs
+                    .write_elem(vd, dsew, i, fp_widen_binop(a, b, sew, f64_add));
+                continue;
+            }
+            0b110010 => {
+                // vfwsub.vv
+                let dsew = sew * 2;
+                cpu.vregs
+                    .write_elem(vd, dsew, i, fp_widen_binop(a, b, sew, f64_sub));
+                continue;
+            }
+            0b110100 => {
+                // vfwadd.wv (vs2 is 2*SEW, vs1 is SEW)
+                let dsew = sew * 2;
+                let a_wide = cpu.vregs.read_elem(vs2, dsew, i);
+                cpu.vregs
+                    .write_elem(vd, dsew, i, fp_widen_w_binop(a_wide, b, sew, f64_add));
+                continue;
+            }
+            0b110110 => {
+                // vfwsub.wv (vs2 is 2*SEW, vs1 is SEW)
+                let dsew = sew * 2;
+                let a_wide = cpu.vregs.read_elem(vs2, dsew, i);
+                cpu.vregs
+                    .write_elem(vd, dsew, i, fp_widen_w_binop(a_wide, b, sew, f64_sub));
+                continue;
+            }
+            0b111000 => {
+                // vfwmul.vv
+                let dsew = sew * 2;
+                cpu.vregs
+                    .write_elem(vd, dsew, i, fp_widen_binop(a, b, sew, f64_mul));
+                continue;
+            }
+            // Widening FP FMA (vd is 2*SEW accumulator, vs2/vs1 are SEW)
+            0b111100 => {
+                // vfwmacc.vv: vd += vs2 * vs1 (widening)
+                let dsew = sew * 2;
+                let d = cpu.vregs.read_elem(vd, dsew, i);
+                cpu.vregs
+                    .write_elem(vd, dsew, i, fp_widen_fma(a, b, d, sew));
+                continue;
+            }
+            0b111101 => {
+                // vfwnmacc.vv: vd = -(vs2 * vs1) - vd
+                let dsew = sew * 2;
+                let d = cpu.vregs.read_elem(vd, dsew, i);
+                cpu.vregs
+                    .write_elem(vd, dsew, i, fp_neg(dsew, fp_widen_fma(a, b, d, sew)));
+                continue;
+            }
+            0b111110 => {
+                // vfwmsac.vv: vd = vs2 * vs1 - vd
+                let dsew = sew * 2;
+                let d = cpu.vregs.read_elem(vd, dsew, i);
+                cpu.vregs
+                    .write_elem(vd, dsew, i, fp_widen_fma(a, b, fp_neg(dsew, d), sew));
+                continue;
+            }
+            0b111111 => {
+                // vfwnmsac.vv: vd = -(vs2 * vs1) + vd
+                let dsew = sew * 2;
+                let d = cpu.vregs.read_elem(vd, dsew, i);
+                let neg_prod_plus_d = fp_neg(dsew, fp_widen_fma(a, b, fp_neg(dsew, d), sew));
+                cpu.vregs.write_elem(vd, dsew, i, neg_prod_plus_d);
+                continue;
+            }
+
+            // --- Widening/narrowing FP conversions (encoded as unary ops) ---
             _ => continue,
         };
 
@@ -956,6 +1273,77 @@ fn execute_fvf(cpu: &mut Cpu, ctx: &VCtx, scalar: u64) {
             0b011011 => u64::from(fp_lt(sew, a, b)),
             0b011100 => u64::from(!fp_eq(sew, a, b) && !fp_is_nan(sew, a) && !fp_is_nan(sew, b)),
             0b011101 => u64::from(!fp_le(sew, b, a)), // vmfgt (a > b)
+
+            // --- Widening FP ops with scalar (.vf) ---
+            0b110000 => {
+                // vfwadd.vf
+                let dsew = sew * 2;
+                cpu.vregs
+                    .write_elem(vd, dsew, i, fp_widen_binop(a, b, sew, f64_add));
+                continue;
+            }
+            0b110010 => {
+                // vfwsub.vf
+                let dsew = sew * 2;
+                cpu.vregs
+                    .write_elem(vd, dsew, i, fp_widen_binop(a, b, sew, f64_sub));
+                continue;
+            }
+            0b110100 => {
+                // vfwadd.wf (vs2 is 2*SEW, scalar is SEW)
+                let dsew = sew * 2;
+                let a_wide = cpu.vregs.read_elem(vs2, dsew, i);
+                cpu.vregs
+                    .write_elem(vd, dsew, i, fp_widen_w_binop(a_wide, b, sew, f64_add));
+                continue;
+            }
+            0b110110 => {
+                // vfwsub.wf (vs2 is 2*SEW, scalar is SEW)
+                let dsew = sew * 2;
+                let a_wide = cpu.vregs.read_elem(vs2, dsew, i);
+                cpu.vregs
+                    .write_elem(vd, dsew, i, fp_widen_w_binop(a_wide, b, sew, f64_sub));
+                continue;
+            }
+            0b111000 => {
+                // vfwmul.vf
+                let dsew = sew * 2;
+                cpu.vregs
+                    .write_elem(vd, dsew, i, fp_widen_binop(a, b, sew, f64_mul));
+                continue;
+            }
+            0b111100 => {
+                // vfwmacc.vf
+                let dsew = sew * 2;
+                let d = cpu.vregs.read_elem(vd, dsew, i);
+                cpu.vregs
+                    .write_elem(vd, dsew, i, fp_widen_fma(a, b, d, sew));
+                continue;
+            }
+            0b111101 => {
+                // vfwnmacc.vf
+                let dsew = sew * 2;
+                let d = cpu.vregs.read_elem(vd, dsew, i);
+                cpu.vregs
+                    .write_elem(vd, dsew, i, fp_neg(dsew, fp_widen_fma(a, b, d, sew)));
+                continue;
+            }
+            0b111110 => {
+                // vfwmsac.vf
+                let dsew = sew * 2;
+                let d = cpu.vregs.read_elem(vd, dsew, i);
+                cpu.vregs
+                    .write_elem(vd, dsew, i, fp_widen_fma(a, b, fp_neg(dsew, d), sew));
+                continue;
+            }
+            0b111111 => {
+                // vfwnmsac.vf
+                let dsew = sew * 2;
+                let d = cpu.vregs.read_elem(vd, dsew, i);
+                let neg_prod_plus_d = fp_neg(dsew, fp_widen_fma(a, b, fp_neg(dsew, d), sew));
+                cpu.vregs.write_elem(vd, dsew, i, neg_prod_plus_d);
+                continue;
+            }
 
             _ => continue,
         };
@@ -1092,6 +1480,86 @@ fn sat_sub(a: u64, b: u64, sew: u32, cpu: &mut Cpu) -> u64 {
 }
 
 // ============================================================================
+// Fixed-point helpers
+// ============================================================================
+
+/// vsmul: signed saturating fractional multiply (Q-format)
+/// result = clip(roundoff_signed(vs2[i]*vs1[i], SEW-1))
+fn vsmul(a: u64, b: u64, sew: u32, cpu: &mut Cpu) -> u64 {
+    let sa = sext_sew(a, sew) as i128;
+    let sb = sext_sew(b, sew) as i128;
+    let product = sa * sb;
+    let shift = sew - 1;
+    let vxrm = (cpu.csrs.read(csr::VXRM) & 3) as u32;
+    let round_inc = rounding_increment(product as u64 as u128, shift, vxrm);
+    let shifted = (product >> shift) + round_inc as i128;
+    let max = (1i128 << (sew - 1)) - 1;
+    let min = -(1i128 << (sew - 1));
+    if shifted > max {
+        cpu.csrs
+            .write_raw(csr::VXSAT, cpu.csrs.read(csr::VXSAT) | 1);
+        trunc_sew(max as u64, sew)
+    } else if shifted < min {
+        cpu.csrs
+            .write_raw(csr::VXSAT, cpu.csrs.read(csr::VXSAT) | 1);
+        trunc_sew(min as u64, sew)
+    } else {
+        trunc_sew(shifted as u64, sew)
+    }
+}
+
+/// Rounding increment based on vxrm mode
+fn rounding_increment(val: u128, shift: u32, vxrm: u32) -> u64 {
+    if shift == 0 {
+        return 0;
+    }
+    let d = ((val >> (shift - 1)) & 1) != 0; // bit to be shifted out
+    match vxrm {
+        0 => u64::from(d), // rnu: round to nearest, ties up
+        1 => {
+            // rne: round to nearest, ties to even
+            let odd = if shift >= 2 {
+                (val & ((1u128 << (shift - 1)) - 1)) != 0
+            } else {
+                false
+            };
+            let lsb = ((val >> shift) & 1) != 0;
+            u64::from(d && (odd || lsb))
+        }
+        2 => 0, // rdn: round down (truncate)
+        3 => {
+            // rod: round to odd
+            let d_or_lower = (val & ((1u128 << shift) - 1)) != 0;
+            let lsb = ((val >> shift) & 1) != 0;
+            u64::from(!lsb && d_or_lower)
+        }
+        _ => 0,
+    }
+}
+
+/// vssrl: scaling shift right logical with rounding
+fn vssrl_op(a: u64, shift: u32, sew: u32, cpu: &Cpu) -> u64 {
+    let val = trunc_sew(a, sew);
+    if shift == 0 {
+        return val;
+    }
+    let vxrm = (cpu.csrs.read(csr::VXRM) & 3) as u32;
+    let round_inc = rounding_increment(val as u128, shift, vxrm);
+    trunc_sew((val >> shift).wrapping_add(round_inc), sew)
+}
+
+/// vssra: scaling shift right arithmetic with rounding
+fn vssra_op(a: u64, shift: u32, sew: u32, cpu: &Cpu) -> u64 {
+    let val = sext_sew(a, sew);
+    if shift == 0 {
+        return trunc_sew(val as u64, sew);
+    }
+    let vxrm = (cpu.csrs.read(csr::VXRM) & 3) as u32;
+    let round_inc = rounding_increment(a as u128, shift, vxrm);
+    trunc_sew((val >> shift) as u64 + round_inc, sew)
+}
+
+// ============================================================================
 // Vector-vector integer operations (OPIVV, funct3=0)
 // ============================================================================
 fn execute_vv_int(cpu: &mut Cpu, ctx: &VCtx) {
@@ -1156,6 +1624,55 @@ fn execute_vv_int(cpu: &mut Cpu, ctx: &VCtx) {
             0b100001 => sat_add(a, b, sew, cpu),  // vsadd.vv
             0b100010 => sat_subu(a, b, sew, cpu), // vssubu.vv
             0b100011 => sat_sub(a, b, sew, cpu),  // vssub.vv
+            0b100111 => vsmul(a, b, sew, cpu),    // vsmul.vv
+            0b101010 => {
+                // vssrl.vv: scaling shift right logical (with rounding)
+                let shift = b & ((sew - 1) as u64);
+                vssrl_op(a, shift as u32, sew, cpu)
+            }
+            0b101011 => {
+                // vssra.vv: scaling shift right arithmetic (with rounding)
+                let shift = b & ((sew - 1) as u64);
+                vssra_op(a, shift as u32, sew, cpu)
+            }
+            0b101110 => {
+                // vnclipu.wv: narrowing clip unsigned (vs2 is 2*SEW)
+                let wide = cpu.vregs.read_elem(vs2, sew * 2, i);
+                let shift = cpu.vregs.read_elem(vs1, sew, i) & ((sew * 2 - 1) as u64);
+                let rounded = vssrl_op(wide, shift as u32, sew * 2, cpu);
+                let max = trunc_sew(u64::MAX, sew);
+                if rounded > max {
+                    cpu.csrs
+                        .write_raw(csr::VXSAT, cpu.csrs.read(csr::VXSAT) | 1);
+                    cpu.vregs.write_elem(vd, sew, i, max);
+                } else {
+                    cpu.vregs.write_elem(vd, sew, i, trunc_sew(rounded, sew));
+                }
+                continue;
+            }
+            0b101111 => {
+                // vnclip.wv: narrowing clip signed (vs2 is 2*SEW)
+                let wide = cpu.vregs.read_elem(vs2, sew * 2, i);
+                let shift = cpu.vregs.read_elem(vs1, sew, i) & ((sew * 2 - 1) as u64);
+                let rounded = vssra_op(wide, shift as u32, sew * 2, cpu) as i64;
+                let sew_bits = sew as i64;
+                let lo = -(1i64 << (sew_bits - 1));
+                let hi = (1i64 << (sew_bits - 1)) - 1;
+                let clamped = sext_sew(rounded as u64, sew * 2);
+                if clamped < lo {
+                    cpu.csrs
+                        .write_raw(csr::VXSAT, cpu.csrs.read(csr::VXSAT) | 1);
+                    cpu.vregs.write_elem(vd, sew, i, trunc_sew(lo as u64, sew));
+                } else if clamped > hi {
+                    cpu.csrs
+                        .write_raw(csr::VXSAT, cpu.csrs.read(csr::VXSAT) | 1);
+                    cpu.vregs.write_elem(vd, sew, i, trunc_sew(hi as u64, sew));
+                } else {
+                    cpu.vregs
+                        .write_elem(vd, sew, i, trunc_sew(clamped as u64, sew));
+                }
+                continue;
+            }
             0b011000 => u64::from(a == b),
             0b011001 => u64::from(a != b),
             0b011010 => u64::from(a < b),
@@ -1261,6 +1778,55 @@ fn execute_vxi_int(cpu: &mut Cpu, ctx: &VCtx, scalar: u64) {
             0b100001 => sat_add(a, b, sew, cpu),  // vsadd.vx
             0b100010 => sat_subu(a, b, sew, cpu), // vssubu.vx
             0b100011 => sat_sub(a, b, sew, cpu),  // vssub.vx
+            0b100111 => vsmul(a, b, sew, cpu),    // vsmul.vx
+            0b101010 => {
+                // vssrl.vx / vssrl.vi
+                let shift = b & ((sew - 1) as u64);
+                vssrl_op(a, shift as u32, sew, cpu)
+            }
+            0b101011 => {
+                // vssra.vx / vssra.vi
+                let shift = b & ((sew - 1) as u64);
+                vssra_op(a, shift as u32, sew, cpu)
+            }
+            0b101110 => {
+                // vnclipu.wx / vnclipu.wi
+                let wide = cpu.vregs.read_elem(vs2, sew * 2, i);
+                let shift = b & ((sew * 2 - 1) as u64);
+                let rounded = vssrl_op(wide, shift as u32, sew * 2, cpu);
+                let max = trunc_sew(u64::MAX, sew);
+                if rounded > max {
+                    cpu.csrs
+                        .write_raw(csr::VXSAT, cpu.csrs.read(csr::VXSAT) | 1);
+                    cpu.vregs.write_elem(vd, sew, i, max);
+                } else {
+                    cpu.vregs.write_elem(vd, sew, i, trunc_sew(rounded, sew));
+                }
+                continue;
+            }
+            0b101111 => {
+                // vnclip.wx / vnclip.wi
+                let wide = cpu.vregs.read_elem(vs2, sew * 2, i);
+                let shift = b & ((sew * 2 - 1) as u64);
+                let rounded = vssra_op(wide, shift as u32, sew * 2, cpu) as i64;
+                let sew_bits = sew as i64;
+                let lo = -(1i64 << (sew_bits - 1));
+                let hi = (1i64 << (sew_bits - 1)) - 1;
+                let clamped = sext_sew(rounded as u64, sew * 2);
+                if clamped < lo {
+                    cpu.csrs
+                        .write_raw(csr::VXSAT, cpu.csrs.read(csr::VXSAT) | 1);
+                    cpu.vregs.write_elem(vd, sew, i, trunc_sew(lo as u64, sew));
+                } else if clamped > hi {
+                    cpu.csrs
+                        .write_raw(csr::VXSAT, cpu.csrs.read(csr::VXSAT) | 1);
+                    cpu.vregs.write_elem(vd, sew, i, trunc_sew(hi as u64, sew));
+                } else {
+                    cpu.vregs
+                        .write_elem(vd, sew, i, trunc_sew(clamped as u64, sew));
+                }
+                continue;
+            }
             0b011000 => u64::from(a == b),
             0b011001 => u64::from(a != b),
             0b011100 => u64::from(a <= b),
