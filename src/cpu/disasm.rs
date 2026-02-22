@@ -212,11 +212,24 @@ pub fn disassemble(raw: u32, pc: u64) -> String {
         0x2F => disasm_atomic(raw, rd, rs1, rs2, funct3, funct7),
         0x0F => {
             if funct3 == 0 {
-                "fence".to_string()
+                if raw == 0x0180000F {
+                    "fence.tso".to_string()
+                } else {
+                    "fence".to_string()
+                }
             } else if funct3 == 1 {
                 "fence.i".to_string()
-            } else if raw == 0x0180000F {
-                "fence.tso".to_string()
+            } else if funct3 == 2 {
+                // CBO instructions — operation in rs2 field (bits 24:20)
+                let cbo_op = (raw >> 20) & 0x1F;
+                let base = r(rs1);
+                match cbo_op {
+                    0 => format!("cbo.inval ({})", base),
+                    1 => format!("cbo.clean ({})", base),
+                    2 => format!("cbo.flush ({})", base),
+                    4 => format!("cbo.zero ({})", base),
+                    _ => format!("cbo.?{}  ({})", cbo_op, base),
+                }
             } else {
                 format!("fence?  {:#010x}", raw)
             }
@@ -306,7 +319,20 @@ fn disasm_op_imm(raw: u32, rd: usize, rs1: usize, funct3: u32, funct7: u32, imm:
                 }
             }
         }
-        6 => format!("ori     {}, {}, {}", r(rd), r(rs1), imm),
+        6 => {
+            // Zicbop: PREFETCH hints are ORI with rd=0
+            if rd == 0 {
+                let rs2_field = (raw >> 20) & 0x1F;
+                match rs2_field {
+                    0 => format!("prefetch.i {}({})", (imm >> 5) << 5, r(rs1)),
+                    1 => format!("prefetch.r {}({})", (imm >> 5) << 5, r(rs1)),
+                    3 => format!("prefetch.w {}({})", (imm >> 5) << 5, r(rs1)),
+                    _ => format!("ori     {}, {}, {}", r(rd), r(rs1), imm),
+                }
+            } else {
+                format!("ori     {}, {}, {}", r(rd), r(rs1), imm)
+            }
+        }
         7 => {
             if imm == -1 {
                 format!("not     {}, {}", r(rd), r(rs1))
@@ -834,7 +860,14 @@ pub fn mnemonic(inst: u32) -> &'static str {
             _ => "aluw?",
         },
         0x2F => "atomic",
-        0x0F => "fence",
+        0x0F => {
+            let f3 = (inst >> 12) & 0x7;
+            if f3 == 2 {
+                "cbo"
+            } else {
+                "fence"
+            }
+        }
         0x73 => match funct3 {
             0 => {
                 let imm = inst >> 20;

@@ -238,7 +238,11 @@ impl CsrFile {
         csrs.regs[MSTATUS as usize] = mstatus;
         // Enable Sstc extension: MENVCFG.STCE (bit 63)
         // Enable Svadu: MENVCFG.ADUE (bit 61) — hardware A/D bit updates
-        csrs.regs[MENVCFG as usize] = (1u64 << 63) | (1u64 << 61);
+        // Enable Zicboz: MENVCFG.CBZE (bit 6) — CBO.ZERO allowed in S/U mode
+        // Enable Zicbom: MENVCFG.CBCFE (bit 7) — CBO.CLEAN/FLUSH allowed in S/U mode
+        // Enable Zicbom: MENVCFG.CBIE=01 (bits 5:4) — CBO.INVAL performs invalidate
+        csrs.regs[MENVCFG as usize] =
+            (1u64 << 63) | (1u64 << 61) | (1u64 << 7) | (1u64 << 6) | (0b01u64 << 4);
         // stimecmp defaults to max (no interrupt)
         csrs.regs[STIMECMP as usize] = u64::MAX;
         // Smstateen: default all bits set (all state accessible)

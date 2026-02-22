@@ -10778,3 +10778,189 @@ fn test_zkr_in_isa_string() {
         "DTB should advertise zkr extension"
     );
 }
+
+// === CBO permission checks (Zicbom/Zicboz menvcfg/senvcfg enforcement) ===
+
+#[test]
+fn test_cbo_zero_denied_in_supervisor_when_cbze_clear() {
+    // CBO.ZERO with rs1=1, CBZE=0 → should trap (illegal instruction)
+    let cbo_zero: u32 = (0x04 << 20) | (1 << 15) | (2 << 12) | 0x0F;
+    let mut bus = Bus::new(64 * 1024);
+    let bytes = cbo_zero.to_le_bytes();
+    bus.load_binary(&bytes, 0);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+    cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
+    cpu.regs[1] = DRAM_BASE + 256;
+    // Clear CBZE (bit 6) in menvcfg
+    let menvcfg = cpu.csrs.read(csr::MENVCFG) & !(1u64 << 6);
+    cpu.csrs.write(csr::MENVCFG, menvcfg);
+    cpu.step(&mut bus);
+    // Should have trapped — mcause=2 (illegal instruction)
+    assert_eq!(
+        cpu.csrs.read(csr::MCAUSE),
+        2,
+        "CBO.ZERO should trap when CBZE=0 in S-mode"
+    );
+}
+
+#[test]
+fn test_cbo_zero_allowed_in_supervisor_when_cbze_set() {
+    // CBO.ZERO with CBZE=1 → should succeed
+    let cbo_zero: u32 = (0x04 << 20) | (1 << 15) | (2 << 12) | 0x0F;
+    let mut bus = Bus::new(64 * 1024);
+    let bytes = cbo_zero.to_le_bytes();
+    bus.load_binary(&bytes, 0);
+    // Fill target with 0xFF
+    let target_addr = DRAM_BASE + 256;
+    for i in 0..64 {
+        bus.write8(target_addr + i, 0xFF);
+    }
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+    cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
+    cpu.regs[1] = target_addr;
+    // CBZE should already be set by default
+    assert_ne!(cpu.csrs.read(csr::MENVCFG) & (1 << 6), 0);
+    cpu.step(&mut bus);
+    assert_eq!(cpu.pc, DRAM_BASE + 4, "CBO.ZERO should succeed with CBZE=1");
+    for i in 0..64 {
+        assert_eq!(bus.read8(target_addr + i), 0, "byte {} should be zero", i);
+    }
+}
+
+#[test]
+fn test_cbo_clean_flush_denied_when_cbcfe_clear() {
+    // CBO.CLEAN (rs2=1) and CBO.FLUSH (rs2=2) denied when CBCFE=0
+    for (name, rs2_val) in [("CLEAN", 1u32), ("FLUSH", 2)] {
+        let cbo = (rs2_val << 20) | (1 << 15) | (2 << 12) | 0x0F;
+        let mut bus = Bus::new(64 * 1024);
+        bus.load_binary(&cbo.to_le_bytes(), 0);
+        let mut cpu = Cpu::new();
+        setup_pmp_allow_all(&mut cpu);
+        cpu.reset(DRAM_BASE);
+        cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
+        cpu.regs[1] = DRAM_BASE + 256;
+        let menvcfg = cpu.csrs.read(csr::MENVCFG) & !(1u64 << 7);
+        cpu.csrs.write(csr::MENVCFG, menvcfg);
+        cpu.step(&mut bus);
+        assert_eq!(
+            cpu.csrs.read(csr::MCAUSE),
+            2,
+            "CBO.{} should trap when CBCFE=0",
+            name
+        );
+    }
+}
+
+#[test]
+fn test_cbo_inval_denied_when_cbie_zero() {
+    // CBO.INVAL (rs2=0) denied when CBIE=00 (bits 5:4)
+    let cbo_inval = (0u32 << 20) | (1 << 15) | (2 << 12) | 0x0F;
+    let mut bus = Bus::new(64 * 1024);
+    bus.load_binary(&cbo_inval.to_le_bytes(), 0);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+    cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
+    cpu.regs[1] = DRAM_BASE + 256;
+    // Clear CBIE bits (5:4) in menvcfg
+    let menvcfg = cpu.csrs.read(csr::MENVCFG) & !(0b11u64 << 4);
+    cpu.csrs.write(csr::MENVCFG, menvcfg);
+    cpu.step(&mut bus);
+    assert_eq!(
+        cpu.csrs.read(csr::MCAUSE),
+        2,
+        "CBO.INVAL should trap when CBIE=00"
+    );
+}
+
+#[test]
+fn test_cbo_always_allowed_in_machine_mode() {
+    // All CBO ops should work in M-mode regardless of menvcfg settings
+    for (name, rs2_val) in [("INVAL", 0u32), ("CLEAN", 1), ("FLUSH", 2), ("ZERO", 4)] {
+        let cbo = (rs2_val << 20) | (1 << 15) | (2 << 12) | 0x0F;
+        let mut bus = Bus::new(64 * 1024);
+        bus.load_binary(&cbo.to_le_bytes(), 0);
+        let mut cpu = Cpu::new();
+        setup_pmp_allow_all(&mut cpu);
+        cpu.reset(DRAM_BASE);
+        cpu.regs[1] = DRAM_BASE + 256;
+        // Clear ALL CBO enables in menvcfg
+        let menvcfg = cpu.csrs.read(csr::MENVCFG) & !(0xF0u64);
+        cpu.csrs.write(csr::MENVCFG, menvcfg);
+        cpu.step(&mut bus);
+        assert_eq!(
+            cpu.pc,
+            DRAM_BASE + 4,
+            "CBO.{} should always work in M-mode",
+            name
+        );
+    }
+}
+
+// === Disassembler: CBO + prefetch ===
+
+#[test]
+fn test_disasm_cbo_instructions() {
+    use microvm::cpu::disasm::disassemble;
+    // CBO.ZERO with rs1=a0 (x10)
+    let cbo_zero: u32 = (0x04 << 20) | (10 << 15) | (2 << 12) | 0x0F;
+    assert!(
+        disassemble(cbo_zero, 0).contains("cbo.zero"),
+        "should disassemble as cbo.zero"
+    );
+    // CBO.INVAL with rs1=a0
+    let cbo_inval: u32 = (0x00 << 20) | (10 << 15) | (2 << 12) | 0x0F;
+    assert!(
+        disassemble(cbo_inval, 0).contains("cbo.inval"),
+        "should disassemble as cbo.inval"
+    );
+    // CBO.CLEAN with rs1=a0
+    let cbo_clean: u32 = (0x01 << 20) | (10 << 15) | (2 << 12) | 0x0F;
+    assert!(
+        disassemble(cbo_clean, 0).contains("cbo.clean"),
+        "should disassemble as cbo.clean"
+    );
+    // CBO.FLUSH with rs1=a0
+    let cbo_flush: u32 = (0x02 << 20) | (10 << 15) | (2 << 12) | 0x0F;
+    assert!(
+        disassemble(cbo_flush, 0).contains("cbo.flush"),
+        "should disassemble as cbo.flush"
+    );
+}
+
+#[test]
+fn test_disasm_prefetch_instructions() {
+    use microvm::cpu::disasm::disassemble;
+    // PREFETCH.I: ORI with rd=0, rs2=0 → opcode=0x13, funct3=6, rd=0
+    // Encoding: imm[11:0]=offset|rs2, rs1, funct3=6, rd=0, opcode=0x13
+    // PREFETCH.I 0(a0): imm[11:5]=0, rs2=0 (imm[4:0]=0), rs1=10, funct3=6, rd=0
+    let prefetch_i: u32 = (0 << 20) | (10 << 15) | (6 << 12) | (0 << 7) | 0x13;
+    let dis = disassemble(prefetch_i, 0);
+    assert!(
+        dis.contains("prefetch.i"),
+        "should disassemble PREFETCH.I, got: {}",
+        dis
+    );
+
+    // PREFETCH.R: rs2=1 → imm[4:0]=1
+    let prefetch_r: u32 = (1 << 20) | (10 << 15) | (6 << 12) | (0 << 7) | 0x13;
+    let dis = disassemble(prefetch_r, 0);
+    assert!(
+        dis.contains("prefetch.r"),
+        "should disassemble PREFETCH.R, got: {}",
+        dis
+    );
+
+    // PREFETCH.W: rs2=3 → imm[4:0]=3
+    let prefetch_w: u32 = (3 << 20) | (10 << 15) | (6 << 12) | (0 << 7) | 0x13;
+    let dis = disassemble(prefetch_w, 0);
+    assert!(
+        dis.contains("prefetch.w"),
+        "should disassemble PREFETCH.W, got: {}",
+        dis
+    );
+}

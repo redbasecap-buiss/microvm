@@ -385,15 +385,63 @@ fn op_misc_mem(cpu: &mut Cpu, bus: &mut Bus, inst: &Instruction, len: u64) {
             // Zicbom / Zicboz: CBO instructions
             // The operation is encoded in bits [24:20] (rs2 field of the raw instruction)
             let cbo_op = (inst.raw >> 20) & 0x1F;
+
+            // Permission checks based on privilege mode and menvcfg/senvcfg
+            let menvcfg = cpu.csrs.read(crate::cpu::csr::MENVCFG);
+            let senvcfg = cpu.csrs.read(crate::cpu::csr::SENVCFG);
+
             match cbo_op {
-                0 => {} // CBO.INVAL — no cache, NOP
-                1 => {} // CBO.CLEAN — no cache, NOP
-                2 => {} // CBO.FLUSH — no cache, NOP
+                0 => {
+                    // CBO.INVAL (Zicbom) — cache block invalidate
+                    // Check CBIE field (bits 5:4): 00=illegal, 01=inval, 11=flush
+                    let cbie = match cpu.mode {
+                        PrivilegeMode::Machine => 0b01, // Always allowed in M-mode
+                        PrivilegeMode::Supervisor => (menvcfg >> 4) & 0x3,
+                        PrivilegeMode::User => {
+                            let m = (menvcfg >> 4) & 0x3;
+                            let s = (senvcfg >> 4) & 0x3;
+                            // Both must allow; effective = min(m, s) conceptually
+                            if m == 0 || s == 0 {
+                                0
+                            } else {
+                                s
+                            }
+                        }
+                    };
+                    if cbie == 0 {
+                        cpu.handle_exception(2, inst.raw as u64, bus); // Illegal instruction
+                        return;
+                    }
+                    // cbie=01: invalidate (NOP since no cache), cbie=11: flush (NOP)
+                }
+                1 | 2 => {
+                    // CBO.CLEAN (1) / CBO.FLUSH (2) — Zicbom
+                    // Check CBCFE (bit 7): 0=illegal, 1=allowed
+                    let allowed = match cpu.mode {
+                        PrivilegeMode::Machine => true,
+                        PrivilegeMode::Supervisor => (menvcfg >> 7) & 1 == 1,
+                        PrivilegeMode::User => (menvcfg >> 7) & 1 == 1 && (senvcfg >> 7) & 1 == 1,
+                    };
+                    if !allowed {
+                        cpu.handle_exception(2, inst.raw as u64, bus);
+                        return;
+                    }
+                    // NOP — no cache to clean/flush
+                }
                 4 => {
                     // CBO.ZERO (Zicboz) — zero a 64-byte cache block
+                    // Check CBZE (bit 6): 0=illegal, 1=allowed
+                    let allowed = match cpu.mode {
+                        PrivilegeMode::Machine => true,
+                        PrivilegeMode::Supervisor => (menvcfg >> 6) & 1 == 1,
+                        PrivilegeMode::User => (menvcfg >> 6) & 1 == 1 && (senvcfg >> 6) & 1 == 1,
+                    };
+                    if !allowed {
+                        cpu.handle_exception(2, inst.raw as u64, bus);
+                        return;
+                    }
                     let base = cpu.regs[inst.rs1];
                     let block_addr = base & !63; // Align to 64-byte block
-                                                 // Translate and zero 64 bytes
                     if let Ok(phys) = cpu.mmu.translate(
                         block_addr,
                         crate::cpu::mmu::AccessType::Write,
