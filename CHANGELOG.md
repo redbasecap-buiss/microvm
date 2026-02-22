@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.57.0 — Svnapot Extension (64KiB Contiguous Pages)
+
+### Major Features
+- **Svnapot extension**: Naturally Aligned Power-of-Two contiguous page support in the MMU
+  - PTE bit 63 (N bit) enables NAPOT page mappings on level-0 (4KiB) leaf PTEs
+  - `ppn[3:0] = 0b0111` encodes 64KiB (16 × 4KiB) contiguous pages
+  - Physical address construction clears low 4 PPN bits and uses 16-bit page offset
+  - Reserved encodings (`ppn[3:0] ≠ 0b0111` with N=1) correctly raise page faults
+  - N bit on superpages (level > 0) correctly raises page faults (reserved per spec)
+  - A/D bit management works correctly on NAPOT pages
+  - TLB caching uses 16-bit page shift for NAPOT entries
+  - Useful for Linux Transparent Huge Pages (THP) on RISC-V
+- **DTB updated**: ISA string and `riscv,isa-extensions` now advertise `svnapot`
+
+### New Tests
+- `test_svnapot_64k_page_read`: 64KiB NAPOT page read translation at multiple offsets (0x0, 0x8000, 0xFFFF)
+- `test_svnapot_64k_page_write`: Write translation through 64KiB NAPOT page
+- `test_svnapot_reserved_encoding_faults`: Reserved NAPOT encoding (ppn[3:0]≠0b0111) causes page fault
+- `test_svnapot_n_bit_on_superpage_faults`: N bit on 2MiB superpage causes page fault
+- `test_svnapot_ad_bits_set`: A/D bits correctly managed on NAPOT pages
+- `test_dtb_advertises_svnapot`: DTB extension advertisement
+
+### Stats
+- 404 integration tests, all passing
+- 0 clippy warnings
+
 ## v0.46.0 — Zimop & Zcmop Extensions (May-Be-Operations)
 
 ### Major Features

@@ -18,6 +18,9 @@ const PTE_U: u64 = 1 << 4;
 const PTE_A: u64 = 1 << 6;
 const PTE_D: u64 = 1 << 7;
 
+// Svnapot: Naturally Aligned Power-of-Two pages (PTE bit 63)
+const PTE_N: u64 = 1 << 63;
+
 // Svpbmt: Page-Based Memory Types (PTE bits 62:61)
 const PTE_PBMT_MASK: u64 = 0x3 << 61;
 #[allow(dead_code)]
@@ -258,6 +261,14 @@ impl Mmu {
             // Check permissions
             self.check_leaf_permissions(access, mode, pte, csrs)?;
 
+            // Svnapot: handle N bit on leaf PTEs (level 0 only)
+            // When N=1, low PPN bits encode NAPOT size: ppn[3:0]=0b0111 → 64KiB (16×4KiB)
+            let napot = pte & PTE_N != 0;
+            if napot && level != 0 {
+                // N bit set on superpage → reserved, page fault
+                return Err(self.page_fault(access));
+            }
+
             // Superpage alignment check: lower PPN bits must be zero
             let misaligned = match level {
                 4 => ((pte >> 10) & 0xFFFFFFFFF) != 0, // 256 TiB (Sv57 level 4)
@@ -268,6 +279,15 @@ impl Mmu {
             };
             if misaligned {
                 return Err(self.page_fault(access));
+            }
+
+            // Svnapot: validate NAPOT encoding on level-0 leaves
+            // Only ppn[3:0]=0b0111 is defined (64KiB); other patterns are reserved
+            if napot {
+                let ppn_low4 = (pte >> 10) & 0xF;
+                if ppn_low4 != 0b0111 {
+                    return Err(self.page_fault(access));
+                }
             }
 
             // Update A/D bits (hardware-managed, as Linux expects)
@@ -282,23 +302,34 @@ impl Mmu {
             }
 
             // Construct physical address
-            let ppn_pte = (pte >> 10) & 0xFFF_FFFF_FFFF;
-            let page_shift = match level {
-                4 => 48u8,
-                3 => 39,
-                2 => 30,
-                1 => 21,
-                0 => 12,
-                _ => unreachable!(),
+            let (ppn_pte, page_shift) = if napot {
+                // 64KiB NAPOT: ppn[3:0] are part of the offset, effective shift = 16
+                let ppn_base = ((pte >> 10) & 0xFFF_FFFF_FFFF) & !0xF_u64; // clear low 4 bits
+                (ppn_base, 16u8)
+            } else {
+                let ppn_raw = (pte >> 10) & 0xFFF_FFFF_FFFF;
+                let shift = match level {
+                    4 => 48u8,
+                    3 => 39,
+                    2 => 30,
+                    1 => 21,
+                    0 => 12,
+                    _ => unreachable!(),
+                };
+                (ppn_raw, shift)
             };
             let offset_mask = (1u64 << page_shift) - 1;
-            let phys = match level {
-                4 => (ppn_pte & !0xFFFFFFFFF) << 12 | (vaddr & ((1u64 << 48) - 1)), // 256 TiB
-                3 => (ppn_pte & !0x7FFFFFF) << 12 | (vaddr & 0xFF_FFFF_FFFF),       // 512 GiB
-                2 => (ppn_pte & !0x3FFFF) << 12 | (vaddr & 0x3FFFFFFF),             // 1 GiB
-                1 => (ppn_pte & !0x1FF) << 12 | (vaddr & 0x1FFFFF),                 // 2 MiB
-                0 => (ppn_pte << 12) | page_offset,                                 // 4 KiB
-                _ => unreachable!(),
+            let phys = if napot {
+                (ppn_pte << 12) | (vaddr & offset_mask)
+            } else {
+                match level {
+                    4 => (ppn_pte & !0xFFFFFFFFF) << 12 | (vaddr & ((1u64 << 48) - 1)), // 256 TiB
+                    3 => (ppn_pte & !0x7FFFFFF) << 12 | (vaddr & 0xFF_FFFF_FFFF),       // 512 GiB
+                    2 => (ppn_pte & !0x3FFFF) << 12 | (vaddr & 0x3FFFFFFF),             // 1 GiB
+                    1 => (ppn_pte & !0x1FF) << 12 | (vaddr & 0x1FFFFF),                 // 2 MiB
+                    0 => (ppn_pte << 12) | page_offset,                                 // 4 KiB
+                    _ => unreachable!(),
+                }
             };
 
             // PMP check on the translated physical address

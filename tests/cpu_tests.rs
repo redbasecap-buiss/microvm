@@ -9770,3 +9770,277 @@ fn test_hart_get_status_reads_bus() {
     assert_eq!(cpu.regs[10], 0, "SBI_SUCCESS");
     assert_eq!(cpu.regs[11], 0, "hart 1 should be STARTED");
 }
+
+// ============== Svnapot Extension Tests ==============
+
+#[test]
+fn test_svnapot_64k_page_read() {
+    // Svnapot: PTE with N=1 and ppn[3:0]=0b0111 creates a 64KiB contiguous page
+    let mut bus = Bus::new(512 * 1024);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    let pt_base = 0x10000u64;
+    let l0_base = pt_base + 0x1000;
+    let l1_base = pt_base + 0x2000;
+
+    // Level 2 → level 1 pointer
+    let l1_ppn = (DRAM_BASE + l1_base) >> 12;
+    let l2_pte = (l1_ppn << 10) | 0x01; // V=1, pointer
+    bus.write64(DRAM_BASE + pt_base, l2_pte);
+
+    // Level 1 → level 0 pointer
+    let l0_ppn = (DRAM_BASE + l0_base) >> 12;
+    let l1_pte = (l0_ppn << 10) | 0x01; // V=1, pointer
+    bus.write64(DRAM_BASE + l1_base, l1_pte);
+
+    // Level 0 NAPOT leaf: N=1, ppn[3:0]=0b0111, RWX, A, D set
+    // Physical base = DRAM_BASE + 0x40000 (256KiB, aligned to 64KiB = 16 pages)
+    // ppn for 0x40000 offset from DRAM_BASE: (DRAM_BASE + 0x40000) >> 12
+    // We need ppn[3:0] = 0b0111, so the base ppn must have low 4 bits = 0 and we OR in 0x7
+    let phys_base = DRAM_BASE + 0x40000; // 64KiB aligned
+    let base_ppn = phys_base >> 12; // should have low 4 bits = 0
+    assert_eq!(base_ppn & 0xF, 0, "physical base must be 64KiB aligned");
+    let napot_ppn = base_ppn | 0x7; // ppn[3:0] = 0b0111
+    let n_bit: u64 = 1 << 63;
+    let l0_pte = n_bit | (napot_ppn << 10) | 0xCF; // N=1, V=1, R=1, W=1, X=1, A=1, D=1
+                                                   // Fill all 16 level-0 PTEs for the 64KiB NAPOT region (vpn[0] = 0..15)
+    for i in 0..16u64 {
+        bus.write64(DRAM_BASE + l0_base + i * 8, l0_pte);
+    }
+
+    // Write test data at physical base + 0 and + 0x8000 (within 64KiB range)
+    bus.write64(phys_base, 0xCAFE_BABE_1234_5678);
+    bus.write64(phys_base + 0x8000, 0xDEAD_BEEF_ABCD_EF01);
+
+    // Enable Sv39
+    let satp = (8u64 << 60) | ((DRAM_BASE + pt_base) >> 12);
+    cpu.csrs.write(csr::SATP, satp);
+    cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
+
+    // Translate vaddr 0x0 (maps to start of 64KiB region)
+    let result = cpu.mmu.translate(
+        0x0,
+        microvm::cpu::mmu::AccessType::Read,
+        cpu.mode,
+        &cpu.csrs,
+        &mut bus,
+    );
+    assert_eq!(result.unwrap(), phys_base);
+
+    // Translate vaddr 0x8000 (offset within 64KiB NAPOT page)
+    cpu.mmu.flush_tlb(); // flush to force page walk
+    let result2 = cpu.mmu.translate(
+        0x8000,
+        microvm::cpu::mmu::AccessType::Read,
+        cpu.mode,
+        &cpu.csrs,
+        &mut bus,
+    );
+    assert_eq!(result2.unwrap(), phys_base + 0x8000);
+
+    // Translate vaddr 0xFFFF (last byte of 64KiB region)
+    cpu.mmu.flush_tlb();
+    let result3 = cpu.mmu.translate(
+        0xFFFF,
+        microvm::cpu::mmu::AccessType::Read,
+        cpu.mode,
+        &cpu.csrs,
+        &mut bus,
+    );
+    assert_eq!(result3.unwrap(), phys_base + 0xFFFF);
+}
+
+#[test]
+fn test_svnapot_64k_page_write() {
+    // Svnapot: writes through 64KiB NAPOT page
+    let mut bus = Bus::new(512 * 1024);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    let pt_base = 0x10000u64;
+    let l0_base = pt_base + 0x1000;
+    let l1_base = pt_base + 0x2000;
+
+    let l1_ppn = (DRAM_BASE + l1_base) >> 12;
+    bus.write64(DRAM_BASE + pt_base, (l1_ppn << 10) | 0x01);
+
+    let l0_ppn = (DRAM_BASE + l0_base) >> 12;
+    bus.write64(DRAM_BASE + l1_base, (l0_ppn << 10) | 0x01);
+
+    let phys_base = DRAM_BASE + 0x40000;
+    let base_ppn = phys_base >> 12;
+    let napot_ppn = base_ppn | 0x7;
+    let n_bit: u64 = 1 << 63;
+    // A=1, D=1, V=1, R=1, W=1, X=1
+    let l0_pte = n_bit | (napot_ppn << 10) | 0xCF;
+    // Fill all 16 level-0 PTEs for the 64KiB NAPOT region
+    for i in 0..16u64 {
+        bus.write64(DRAM_BASE + l0_base + i * 8, l0_pte);
+    }
+
+    let satp = (8u64 << 60) | ((DRAM_BASE + pt_base) >> 12);
+    cpu.csrs.write(csr::SATP, satp);
+    cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
+
+    // Write at offset 0x4000 within the 64KiB page
+    let result = cpu.mmu.translate(
+        0x4000,
+        microvm::cpu::mmu::AccessType::Write,
+        cpu.mode,
+        &cpu.csrs,
+        &mut bus,
+    );
+    assert_eq!(result.unwrap(), phys_base + 0x4000);
+}
+
+#[test]
+fn test_svnapot_reserved_encoding_faults() {
+    // Svnapot: ppn[3:0] != 0b0111 with N=1 should cause page fault
+    let mut bus = Bus::new(512 * 1024);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    let pt_base = 0x10000u64;
+    let l0_base = pt_base + 0x1000;
+    let l1_base = pt_base + 0x2000;
+
+    let l1_ppn = (DRAM_BASE + l1_base) >> 12;
+    bus.write64(DRAM_BASE + pt_base, (l1_ppn << 10) | 0x01);
+
+    let l0_ppn = (DRAM_BASE + l0_base) >> 12;
+    bus.write64(DRAM_BASE + l1_base, (l0_ppn << 10) | 0x01);
+
+    let phys_base = DRAM_BASE + 0x40000;
+    let base_ppn = phys_base >> 12;
+    let n_bit: u64 = 1 << 63;
+
+    // Reserved NAPOT encoding: ppn[3:0] = 0b0011 (not 0b0111)
+    let bad_napot_ppn = base_ppn | 0x3;
+    let l0_pte = n_bit | (bad_napot_ppn << 10) | 0xCF;
+    bus.write64(DRAM_BASE + l0_base, l0_pte);
+
+    let satp = (8u64 << 60) | ((DRAM_BASE + pt_base) >> 12);
+    cpu.csrs.write(csr::SATP, satp);
+    cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
+
+    let result = cpu.mmu.translate(
+        0x0,
+        microvm::cpu::mmu::AccessType::Read,
+        cpu.mode,
+        &cpu.csrs,
+        &mut bus,
+    );
+    assert!(result.is_err(), "Reserved NAPOT encoding should fault");
+    assert_eq!(result.unwrap_err(), 13, "Should be load page fault");
+}
+
+#[test]
+fn test_svnapot_n_bit_on_superpage_faults() {
+    // Svnapot: N bit on a superpage (level > 0) is reserved → page fault
+    let mut bus = Bus::new(512 * 1024);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    let pt_base = 0x10000u64;
+    let l1_base = pt_base + 0x1000;
+
+    let l1_ppn = (DRAM_BASE + l1_base) >> 12;
+    bus.write64(DRAM_BASE + pt_base, (l1_ppn << 10) | 0x01);
+
+    // Level 1 leaf (2MiB superpage) with N bit set — reserved!
+    let n_bit: u64 = 1 << 63;
+    let mega_ppn = DRAM_BASE >> 12; // 2MiB aligned
+    let l1_pte = n_bit | (mega_ppn << 10) | 0xCF;
+    bus.write64(DRAM_BASE + l1_base, l1_pte);
+
+    let satp = (8u64 << 60) | ((DRAM_BASE + pt_base) >> 12);
+    cpu.csrs.write(csr::SATP, satp);
+    cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
+
+    let result = cpu.mmu.translate(
+        0x0,
+        microvm::cpu::mmu::AccessType::Read,
+        cpu.mode,
+        &cpu.csrs,
+        &mut bus,
+    );
+    assert!(result.is_err(), "N bit on superpage should fault");
+    assert_eq!(result.unwrap_err(), 13);
+}
+
+#[test]
+fn test_svnapot_ad_bits_set() {
+    // Svnapot: A/D bits should be set on NAPOT pages too
+    let mut bus = Bus::new(512 * 1024);
+    let mut cpu = Cpu::new();
+    setup_pmp_allow_all(&mut cpu);
+    cpu.reset(DRAM_BASE);
+
+    let pt_base = 0x10000u64;
+    let l0_base = pt_base + 0x1000;
+    let l1_base = pt_base + 0x2000;
+
+    let l1_ppn = (DRAM_BASE + l1_base) >> 12;
+    bus.write64(DRAM_BASE + pt_base, (l1_ppn << 10) | 0x01);
+
+    let l0_ppn = (DRAM_BASE + l0_base) >> 12;
+    bus.write64(DRAM_BASE + l1_base, (l0_ppn << 10) | 0x01);
+
+    let phys_base = DRAM_BASE + 0x40000;
+    let base_ppn = phys_base >> 12;
+    let napot_ppn = base_ppn | 0x7;
+    let n_bit: u64 = 1 << 63;
+    // V=1, R=1, W=1, X=1, A=0, D=0
+    let l0_pte = n_bit | (napot_ppn << 10) | 0x0F;
+    bus.write64(DRAM_BASE + l0_base, l0_pte);
+
+    let satp = (8u64 << 60) | ((DRAM_BASE + pt_base) >> 12);
+    cpu.csrs.write(csr::SATP, satp);
+    cpu.mode = microvm::cpu::PrivilegeMode::Supervisor;
+
+    // Read should set A bit
+    let result = cpu.mmu.translate(
+        0x0,
+        microvm::cpu::mmu::AccessType::Read,
+        cpu.mode,
+        &cpu.csrs,
+        &mut bus,
+    );
+    assert!(result.is_ok());
+    let pte_after = bus.read64(DRAM_BASE + l0_base);
+    assert_ne!(pte_after & (1 << 6), 0, "A bit should be set after read");
+    assert_eq!(
+        pte_after & (1 << 7),
+        0,
+        "D bit should NOT be set after read"
+    );
+
+    // Reset PTE (clear A/D)
+    bus.write64(DRAM_BASE + l0_base, l0_pte);
+    cpu.mmu.flush_tlb();
+
+    // Write should set A and D bits
+    let result = cpu.mmu.translate(
+        0x100,
+        microvm::cpu::mmu::AccessType::Write,
+        cpu.mode,
+        &cpu.csrs,
+        &mut bus,
+    );
+    assert!(result.is_ok());
+    let pte_after = bus.read64(DRAM_BASE + l0_base);
+    assert_ne!(pte_after & (1 << 6), 0, "A bit should be set after write");
+    assert_ne!(pte_after & (1 << 7), 0, "D bit should be set after write");
+}
+
+#[test]
+fn test_dtb_advertises_svnapot() {
+    let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "", false, None);
+    let dtb_str = String::from_utf8_lossy(&dtb);
+    assert!(dtb_str.contains("svnapot"), "DTB should advertise svnapot");
+}
