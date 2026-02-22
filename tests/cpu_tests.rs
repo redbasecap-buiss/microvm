@@ -2539,8 +2539,8 @@ fn test_zicond_czero_nez() {
 
 #[test]
 fn test_zawrs_wrs_nto() {
-    // WRS.NTO: 0x01800073 — wait on reservation set (no timeout), NOP in emulator
-    let wrs_nto = 0x01800073u32;
+    // WRS.NTO: 0x00D00073 — wait on reservation set (no timeout), NOP in emulator
+    let wrs_nto = 0x00D00073u32;
     let (cpu, _) = run_program(&[wrs_nto], 1);
     assert_eq!(cpu.pc, DRAM_BASE + 4, "WRS.NTO should advance PC by 4");
 }

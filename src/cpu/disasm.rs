@@ -571,7 +571,7 @@ fn disasm_system(raw: u32, rd: usize, rs1: usize, funct3: u32) -> String {
             0x10200073 => "sret".to_string(),
             0x30200073 => "mret".to_string(),
             0x10500073 => "wfi".to_string(),
-            0x01800073 => "wrs.nto".to_string(),
+            0x00D00073 => "wrs.nto".to_string(),
             0x01D00073 => "wrs.sto".to_string(),
             _ => {
                 // SFENCE.VMA, SINVAL.VMA, etc.
