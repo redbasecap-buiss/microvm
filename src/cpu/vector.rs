@@ -79,6 +79,11 @@ impl VectorRegFile {
         (self.data[0][idx / 8] >> (idx % 8)) & 1 != 0
     }
 
+    /// Read mask bit from any register (for vcpop, vfirst, vmsbf, etc.)
+    pub fn mask_bit_of(&self, vreg: usize, idx: usize) -> bool {
+        (self.data[vreg][idx / 8] >> (idx % 8)) & 1 != 0
+    }
+
     /// Set mask bit for element idx in register vd
     pub fn set_mask_bit(&mut self, vd: usize, idx: usize, val: bool) {
         let byte_idx = idx / 8;
@@ -722,6 +727,21 @@ fn execute_fvv(cpu: &mut Cpu, ctx: &VCtx) {
             }
             cpu.vregs.write_elem(vd, sew, 0, acc);
         }
+        0b010000 => {
+            // vfmv.f.s: f[rd] = vs2[0]
+            if vl > 0 {
+                let val = cpu.vregs.read_elem(vs2, sew, 0);
+                match sew {
+                    32 => {
+                        // NaN-box: upper bits all 1s
+                        cpu.fregs[vd] = 0xFFFF_FFFF_0000_0000 | (val & 0xFFFF_FFFF);
+                    }
+                    _ => {
+                        cpu.fregs[vd] = val;
+                    }
+                }
+            }
+        }
         _ => {
             // Element-wise ops
             execute_fvv_elemwise(cpu, ctx);
@@ -1007,6 +1027,71 @@ fn sext_sew(val: u64, sew: u32) -> i64 {
 }
 
 // ============================================================================
+// Saturating arithmetic helpers
+// ============================================================================
+
+/// Saturating unsigned add
+fn sat_addu(a: u64, b: u64, sew: u32, cpu: &mut Cpu) -> u64 {
+    let max = trunc_sew(u64::MAX, sew);
+    let sum = a.wrapping_add(b);
+    let result = trunc_sew(sum, sew);
+    if a > max - (trunc_sew(b, sew)) {
+        cpu.csrs.write(csr::VXSAT, 1);
+        max
+    } else {
+        result
+    }
+}
+
+/// Saturating signed add
+fn sat_add(a: u64, b: u64, sew: u32, cpu: &mut Cpu) -> u64 {
+    let sa = sext_sew(a, sew);
+    let sb = sext_sew(b, sew);
+    let sum = sa.wrapping_add(sb);
+    let max = (1i64 << (sew - 1)) - 1;
+    let min = -(1i64 << (sew - 1));
+    if sum > max {
+        cpu.csrs.write(csr::VXSAT, 1);
+        trunc_sew(max as u64, sew)
+    } else if sum < min {
+        cpu.csrs.write(csr::VXSAT, 1);
+        trunc_sew(min as u64, sew)
+    } else {
+        trunc_sew(sum as u64, sew)
+    }
+}
+
+/// Saturating unsigned subtract
+fn sat_subu(a: u64, b: u64, sew: u32, cpu: &mut Cpu) -> u64 {
+    let ta = trunc_sew(a, sew);
+    let tb = trunc_sew(b, sew);
+    if ta < tb {
+        cpu.csrs.write(csr::VXSAT, 1);
+        0
+    } else {
+        trunc_sew(ta - tb, sew)
+    }
+}
+
+/// Saturating signed subtract
+fn sat_sub(a: u64, b: u64, sew: u32, cpu: &mut Cpu) -> u64 {
+    let sa = sext_sew(a, sew);
+    let sb = sext_sew(b, sew);
+    let diff = sa.wrapping_sub(sb);
+    let max = (1i64 << (sew - 1)) - 1;
+    let min = -(1i64 << (sew - 1));
+    if diff > max {
+        cpu.csrs.write(csr::VXSAT, 1);
+        trunc_sew(max as u64, sew)
+    } else if diff < min {
+        cpu.csrs.write(csr::VXSAT, 1);
+        trunc_sew(min as u64, sew)
+    } else {
+        trunc_sew(diff as u64, sew)
+    }
+}
+
+// ============================================================================
 // Vector-vector integer operations (OPIVV, funct3=0)
 // ============================================================================
 fn execute_vv_int(cpu: &mut Cpu, ctx: &VCtx) {
@@ -1044,6 +1129,33 @@ fn execute_vv_int(cpu: &mut Cpu, ctx: &VCtx) {
             0b000101 => trunc_sew(sext_sew(a, sew).min(sext_sew(b, sew)) as u64, sew),
             0b000110 => trunc_sew(a.max(b), sew),
             0b000111 => trunc_sew(sext_sew(a, sew).max(sext_sew(b, sew)) as u64, sew),
+            // vrgather.vv: vd[i] = vs2[vs1[i]] (gather by index)
+            0b001100 => {
+                let vlmax = (VLEN as u64) / (sew as u64);
+                let idx = b; // vs1[i] is the index
+                if idx < vlmax {
+                    cpu.vregs.read_elem(vs2, sew, idx as usize)
+                } else {
+                    0 // out-of-range → 0
+                }
+            }
+            // vrgatherei16.vv: vd[i] = vs2[vs1[i]] (index is SEW=16)
+            0b001110 => {
+                let vlmax = (VLEN as u64) / (sew as u64);
+                let idx = cpu.vregs.read_elem(vs1, 16, i) & 0xFFFF;
+                let val = if idx < vlmax {
+                    cpu.vregs.read_elem(vs2, sew, idx as usize)
+                } else {
+                    0
+                };
+                cpu.vregs.write_elem(vd, sew, i, val);
+                continue;
+            }
+            // --- Saturating add/sub (OPIVV) ---
+            0b100000 => sat_addu(a, b, sew, cpu), // vsaddu.vv
+            0b100001 => sat_add(a, b, sew, cpu),  // vsadd.vv
+            0b100010 => sat_subu(a, b, sew, cpu), // vssubu.vv
+            0b100011 => sat_sub(a, b, sew, cpu),  // vssub.vv
             0b011000 => u64::from(a == b),
             0b011001 => u64::from(a != b),
             0b011010 => u64::from(a < b),
@@ -1114,6 +1226,41 @@ fn execute_vxi_int(cpu: &mut Cpu, ctx: &VCtx, scalar: u64) {
             0b100101 => trunc_sew(a << (b & (sew as u64 - 1)), sew),
             0b101000 => trunc_sew(trunc_sew(a, sew) >> (b & (sew as u64 - 1)), sew),
             0b101001 => trunc_sew((sext_sew(a, sew) >> (b & (sew as u64 - 1))) as u64, sew),
+            // vrgather.vx / vrgather.vi: vd[i] = vs2[scalar]
+            0b001100 => {
+                let vlmax = (VLEN as u64) / (sew as u64);
+                if b < vlmax {
+                    cpu.vregs.read_elem(vs2, sew, b as usize)
+                } else {
+                    0
+                }
+            }
+            // vslideup.vx / vslideup.vi
+            0b001110 => {
+                let offset = b as usize;
+                if i >= offset {
+                    cpu.vregs.read_elem(vs2, sew, i - offset)
+                } else {
+                    // elements below offset keep their original value in vd
+                    continue;
+                }
+            }
+            // vslidedown.vx / vslidedown.vi
+            0b001111 => {
+                let offset = b as usize;
+                let vlmax = (VLEN as u64 / sew as u64) as usize;
+                let src = i + offset;
+                if src < vlmax {
+                    cpu.vregs.read_elem(vs2, sew, src)
+                } else {
+                    0
+                }
+            }
+            // --- Saturating add/sub (OPIVX/OPIVI) ---
+            0b100000 => sat_addu(a, b, sew, cpu), // vsaddu.vx
+            0b100001 => sat_add(a, b, sew, cpu),  // vsadd.vx
+            0b100010 => sat_subu(a, b, sew, cpu), // vssubu.vx
+            0b100011 => sat_sub(a, b, sew, cpu),  // vssub.vx
             0b011000 => u64::from(a == b),
             0b011001 => u64::from(a != b),
             0b011100 => u64::from(a <= b),
@@ -1395,6 +1542,193 @@ fn execute_mvv(cpu: &mut Cpu, ctx: &VCtx) {
                 }
             }
             cpu.vregs.write_elem(vd, sew, 0, trunc_sew(acc as u64, sew));
+        }
+
+        // --- vmv.x.s / vcpop.m / vfirst.m (funct6=0b010000) ---
+        0b010000 => {
+            match vs1 {
+                0b00000 => {
+                    // vmv.x.s: x[rd] = vs2[0]
+                    let val = if vl > 0 {
+                        sext_sew(cpu.vregs.read_elem(vs2, sew, 0), sew) as u64
+                    } else {
+                        0
+                    };
+                    cpu.regs[vd] = val;
+                }
+                0b10000 => {
+                    // vcpop.m: count set bits in mask vs2
+                    let mut count = 0u64;
+                    for i in 0..vl as usize {
+                        if elem_active(cpu, vm, i) && cpu.vregs.mask_bit_of(vs2, i) {
+                            count += 1;
+                        }
+                    }
+                    cpu.regs[vd] = count;
+                }
+                0b10001 => {
+                    // vfirst.m: find first set bit in mask vs2
+                    let mut result: i64 = -1;
+                    for i in 0..vl as usize {
+                        if elem_active(cpu, vm, i) && cpu.vregs.mask_bit_of(vs2, i) {
+                            result = i as i64;
+                            break;
+                        }
+                    }
+                    cpu.regs[vd] = result as u64;
+                }
+                _ => {}
+            }
+        }
+
+        // --- Mask-register logical ops (funct6=0b010100) ---
+        0b010100 => {
+            match vs1 {
+                0b00001 => {
+                    // vmsbf.m: set-before-first mask bit
+                    let mut found = false;
+                    for i in 0..vl as usize {
+                        if !elem_active(cpu, vm, i) {
+                            continue;
+                        }
+                        if !found && cpu.vregs.mask_bit_of(vs2, i) {
+                            found = true;
+                            cpu.vregs.set_mask_bit(vd, i, false);
+                        } else {
+                            cpu.vregs.set_mask_bit(vd, i, !found);
+                        }
+                    }
+                }
+                0b00010 => {
+                    // vmsof.m: set-only-first mask bit
+                    let mut found = false;
+                    for i in 0..vl as usize {
+                        if !elem_active(cpu, vm, i) {
+                            continue;
+                        }
+                        if !found && cpu.vregs.mask_bit_of(vs2, i) {
+                            found = true;
+                            cpu.vregs.set_mask_bit(vd, i, true);
+                        } else {
+                            cpu.vregs.set_mask_bit(vd, i, false);
+                        }
+                    }
+                }
+                0b00011 => {
+                    // vmsif.m: set-including-first mask bit
+                    let mut found = false;
+                    for i in 0..vl as usize {
+                        if !elem_active(cpu, vm, i) {
+                            continue;
+                        }
+                        if !found {
+                            cpu.vregs.set_mask_bit(vd, i, true);
+                            if cpu.vregs.mask_bit_of(vs2, i) {
+                                found = true;
+                            }
+                        } else {
+                            cpu.vregs.set_mask_bit(vd, i, false);
+                        }
+                    }
+                }
+                0b10000 => {
+                    // viota.m: iota (prefix sum of mask bits)
+                    let mut count = 0u64;
+                    for i in 0..vl as usize {
+                        if !elem_active(cpu, vm, i) {
+                            continue;
+                        }
+                        cpu.vregs.write_elem(vd, sew, i, count);
+                        if cpu.vregs.mask_bit_of(vs2, i) {
+                            count += 1;
+                        }
+                    }
+                }
+                0b10001 => {
+                    // vid.v: vector of element indices
+                    for i in 0..vl as usize {
+                        if !elem_active(cpu, vm, i) {
+                            continue;
+                        }
+                        cpu.vregs.write_elem(vd, sew, i, i as u64);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // --- vcompress.vm (funct6=0b010111) ---
+        0b010111 => {
+            // compress: gather active elements from vs2 using vs1 as mask, pack into vd
+            let mut j = 0usize;
+            for i in 0..vl as usize {
+                if cpu.vregs.mask_bit_of(vs1, i) {
+                    let val = cpu.vregs.read_elem(vs2, sew, i);
+                    cpu.vregs.write_elem(vd, sew, j, val);
+                    j += 1;
+                }
+            }
+            // remaining elements in vd are unchanged (tail undisturbed by default)
+        }
+
+        // --- Averaging add/sub (OPMVV) ---
+        0b001000 => {
+            // vaaddu.vv
+            for i in 0..vl as usize {
+                if !elem_active(cpu, vm, i) {
+                    continue;
+                }
+                let a = cpu.vregs.read_elem(vs2, sew, i) as u128;
+                let b = cpu.vregs.read_elem(vs1, sew, i) as u128;
+                let sum = a + b;
+                let rnd = (cpu.csrs.read(csr::VXRM) & 3) as u128;
+                let r = match rnd {
+                    0 => sum >> 1,       // rnu
+                    1 => (sum + 1) >> 1, // rne (round to nearest, ties to even — simplified)
+                    2 => sum >> 1,       // rdn
+                    _ => sum >> 1,       // rod
+                };
+                cpu.vregs.write_elem(vd, sew, i, trunc_sew(r as u64, sew));
+            }
+        }
+        0b001001 => {
+            // vaadd.vv
+            for i in 0..vl as usize {
+                if !elem_active(cpu, vm, i) {
+                    continue;
+                }
+                let a = sext_sew(cpu.vregs.read_elem(vs2, sew, i), sew) as i128;
+                let b = sext_sew(cpu.vregs.read_elem(vs1, sew, i), sew) as i128;
+                let sum = a + b;
+                let r = sum >> 1;
+                cpu.vregs.write_elem(vd, sew, i, trunc_sew(r as u64, sew));
+            }
+        }
+        0b001010 => {
+            // vasubu.vv
+            for i in 0..vl as usize {
+                if !elem_active(cpu, vm, i) {
+                    continue;
+                }
+                let a = cpu.vregs.read_elem(vs2, sew, i) as u128;
+                let b = cpu.vregs.read_elem(vs1, sew, i) as u128;
+                let diff = a.wrapping_sub(b);
+                let r = diff >> 1;
+                cpu.vregs.write_elem(vd, sew, i, trunc_sew(r as u64, sew));
+            }
+        }
+        0b001011 => {
+            // vasub.vv
+            for i in 0..vl as usize {
+                if !elem_active(cpu, vm, i) {
+                    continue;
+                }
+                let a = sext_sew(cpu.vregs.read_elem(vs2, sew, i), sew) as i128;
+                let b = sext_sew(cpu.vregs.read_elem(vs1, sew, i), sew) as i128;
+                let diff = a - b;
+                let r = diff >> 1;
+                cpu.vregs.write_elem(vd, sew, i, trunc_sew(r as u64, sew));
+            }
         }
 
         // --- vzext / vsext (funct6=0b010010, vs1 encodes variant) ---
@@ -1785,6 +2119,72 @@ fn execute_mvv(cpu: &mut Cpu, ctx: &VCtx) {
             }
         }
 
+        // --- Mask-register logical operations ---
+        0b011000 => {
+            // vmand.mm
+            for i in 0..vl as usize {
+                let a = cpu.vregs.mask_bit_of(vs2, i);
+                let b = cpu.vregs.mask_bit_of(vs1, i);
+                cpu.vregs.set_mask_bit(vd, i, a && b);
+            }
+        }
+        0b011001 => {
+            // vmnand.mm
+            for i in 0..vl as usize {
+                let a = cpu.vregs.mask_bit_of(vs2, i);
+                let b = cpu.vregs.mask_bit_of(vs1, i);
+                cpu.vregs.set_mask_bit(vd, i, !(a && b));
+            }
+        }
+        0b011010 => {
+            // vmandn.mm (vmandnot)
+            for i in 0..vl as usize {
+                let a = cpu.vregs.mask_bit_of(vs2, i);
+                let b = cpu.vregs.mask_bit_of(vs1, i);
+                cpu.vregs.set_mask_bit(vd, i, a && !b);
+            }
+        }
+        0b011011 => {
+            // vmxor.mm
+            for i in 0..vl as usize {
+                let a = cpu.vregs.mask_bit_of(vs2, i);
+                let b = cpu.vregs.mask_bit_of(vs1, i);
+                cpu.vregs.set_mask_bit(vd, i, a ^ b);
+            }
+        }
+        0b011100 => {
+            // vmor.mm
+            for i in 0..vl as usize {
+                let a = cpu.vregs.mask_bit_of(vs2, i);
+                let b = cpu.vregs.mask_bit_of(vs1, i);
+                cpu.vregs.set_mask_bit(vd, i, a || b);
+            }
+        }
+        0b011101 => {
+            // vmnor.mm
+            for i in 0..vl as usize {
+                let a = cpu.vregs.mask_bit_of(vs2, i);
+                let b = cpu.vregs.mask_bit_of(vs1, i);
+                cpu.vregs.set_mask_bit(vd, i, !(a || b));
+            }
+        }
+        0b011110 => {
+            // vmorn.mm (vmornot)
+            for i in 0..vl as usize {
+                let a = cpu.vregs.mask_bit_of(vs2, i);
+                let b = cpu.vregs.mask_bit_of(vs1, i);
+                cpu.vregs.set_mask_bit(vd, i, a || !b);
+            }
+        }
+        0b011111 => {
+            // vmxnor.mm
+            for i in 0..vl as usize {
+                let a = cpu.vregs.mask_bit_of(vs2, i);
+                let b = cpu.vregs.mask_bit_of(vs1, i);
+                cpu.vregs.set_mask_bit(vd, i, a == b);
+            }
+        }
+
         _ => {}
     }
 }
@@ -1808,6 +2208,86 @@ fn execute_mvx(cpu: &mut Cpu, ctx: &VCtx, scalar: u64) {
             // vmv.s.x
             if vl > 0 {
                 cpu.vregs.write_elem(vd, sew, 0, trunc_sew(scalar, sew));
+            }
+        }
+
+        // --- Averaging add/sub (OPMVX) ---
+        0b001000 => {
+            // vaaddu.vx
+            for i in 0..vl as usize {
+                if !elem_active(cpu, vm, i) {
+                    continue;
+                }
+                let a = cpu.vregs.read_elem(vs2, sew, i) as u128;
+                let b = scalar as u128;
+                cpu.vregs
+                    .write_elem(vd, sew, i, trunc_sew(((a + b) >> 1) as u64, sew));
+            }
+        }
+        0b001001 => {
+            // vaadd.vx
+            for i in 0..vl as usize {
+                if !elem_active(cpu, vm, i) {
+                    continue;
+                }
+                let a = sext_sew(cpu.vregs.read_elem(vs2, sew, i), sew) as i128;
+                let b = sext_sew(scalar, sew) as i128;
+                cpu.vregs
+                    .write_elem(vd, sew, i, trunc_sew(((a + b) >> 1) as u64, sew));
+            }
+        }
+        0b001010 => {
+            // vasubu.vx
+            for i in 0..vl as usize {
+                if !elem_active(cpu, vm, i) {
+                    continue;
+                }
+                let a = cpu.vregs.read_elem(vs2, sew, i) as u128;
+                let b = scalar as u128;
+                cpu.vregs
+                    .write_elem(vd, sew, i, trunc_sew((a.wrapping_sub(b) >> 1) as u64, sew));
+            }
+        }
+        0b001011 => {
+            // vasub.vx
+            for i in 0..vl as usize {
+                if !elem_active(cpu, vm, i) {
+                    continue;
+                }
+                let a = sext_sew(cpu.vregs.read_elem(vs2, sew, i), sew) as i128;
+                let b = sext_sew(scalar, sew) as i128;
+                cpu.vregs
+                    .write_elem(vd, sew, i, trunc_sew(((a - b) >> 1) as u64, sew));
+            }
+        }
+
+        // vslide1up.vx: vd[0] = rs1, vd[i] = vs2[i-1]
+        0b001110 => {
+            for i in 0..vl as usize {
+                if !elem_active(cpu, vm, i) {
+                    continue;
+                }
+                let val = if i == 0 {
+                    trunc_sew(scalar, sew)
+                } else {
+                    cpu.vregs.read_elem(vs2, sew, i - 1)
+                };
+                cpu.vregs.write_elem(vd, sew, i, val);
+            }
+        }
+
+        // vslide1down.vx: vd[vl-1] = rs1, vd[i] = vs2[i+1]
+        0b001111 => {
+            for i in 0..vl as usize {
+                if !elem_active(cpu, vm, i) {
+                    continue;
+                }
+                let val = if i == (vl as usize - 1) {
+                    trunc_sew(scalar, sew)
+                } else {
+                    cpu.vregs.read_elem(vs2, sew, i + 1)
+                };
+                cpu.vregs.write_elem(vd, sew, i, val);
             }
         }
 

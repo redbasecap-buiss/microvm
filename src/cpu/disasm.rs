@@ -879,7 +879,16 @@ pub fn mnemonic(inst: u32) -> &'static str {
             } else if (funct3 == 2 || funct3 == 6) && funct7 >> 1 >= 0b11000 {
                 "vwide"
             } else {
-                "valu"
+                let f6 = funct7 >> 1;
+                if f6 == 0b001100 || f6 == 0b001110 || f6 == 0b001111 || f6 == 0b010111 {
+                    "vperm"
+                } else if (funct3 == 2) && (0b011000..=0b011111).contains(&f6) {
+                    "vmask"
+                } else if f6 == 0b100000 || f6 == 0b100001 || f6 == 0b100010 || f6 == 0b100011 {
+                    "vsat"
+                } else {
+                    "valu"
+                }
             }
         }
         0x43 | 0x47 | 0x4B | 0x4F => "fmadd",
