@@ -152,16 +152,13 @@ impl Cpu {
             }
         };
 
-        // Read instruction (could be 16-bit compressed or 32-bit)
-        let raw16 = bus.read16(phys_pc);
-        let (inst, inst_len) = if raw16 & 0x03 != 0x03 {
-            // Compressed instruction (16-bit)
-            let expanded = decode::expand_compressed(raw16 as u32);
+        // Fast instruction fetch (bypasses device routing for DRAM)
+        let (raw_or_compressed, is_compressed) = bus.fetch_insn(phys_pc);
+        let (inst, inst_len) = if is_compressed {
+            let expanded = decode::expand_compressed(raw_or_compressed);
             (expanded, 2u64)
         } else {
-            // Normal 32-bit instruction
-            let raw32 = bus.read32(phys_pc);
-            (raw32, 4u64)
+            (raw_or_compressed, 4u64)
         };
 
         // Decode and execute
@@ -209,6 +206,7 @@ impl Cpu {
                 };
                 if can_take {
                     self.last_trap = Some((code, true));
+                    self.csrs.hpm_increment(csr::HpmEvent::Interrupt);
                     self.trap_to_smode(code, true);
                     return;
                 }
@@ -220,6 +218,7 @@ impl Cpu {
                 };
                 if can_take {
                     self.last_trap = Some((code, true));
+                    self.csrs.hpm_increment(csr::HpmEvent::Interrupt);
                     self.trap_to_mmode(code, true);
                     return;
                 }
@@ -229,6 +228,7 @@ impl Cpu {
 
     pub fn handle_exception(&mut self, cause: u64, tval: u64, _bus: &mut Bus) {
         self.last_trap = Some((cause, false));
+        self.csrs.hpm_increment(csr::HpmEvent::Exception);
         let medeleg = self.csrs.read(csr::MEDELEG);
         if (medeleg >> cause) & 1 == 1 && self.mode != PrivilegeMode::Machine {
             self.csrs.write(csr::STVAL, tval);

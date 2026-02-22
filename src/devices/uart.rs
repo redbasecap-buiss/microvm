@@ -95,11 +95,10 @@ impl Uart {
 
     /// Feed a byte into the receive FIFO (from external source like stdin)
     pub fn push_byte(&mut self, b: u8) {
-        let max = if self.fifo_enabled {
-            FIFO_SIZE
-        } else {
-            FIFO_SIZE
-        };
+        // When FIFO is disabled, 16550 still has a 1-byte holding register.
+        // We use the full FIFO size regardless to avoid dropping bytes from
+        // external input (stdin) that arrive before the guest enables FIFO.
+        let max = FIFO_SIZE;
         if self.rx_fifo.len() >= max {
             // Overrun: FIFO full, set OE in LSR
             self.lsr |= LSR_OE;

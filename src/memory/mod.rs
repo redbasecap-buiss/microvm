@@ -146,6 +146,40 @@ impl Bus {
         }
     }
 
+    /// Fast instruction fetch: returns (raw32_or_16, is_compressed).
+    /// Bypasses device routing — only valid for DRAM physical addresses.
+    /// Falls back to standard read path for non-DRAM addresses.
+    #[inline]
+    pub fn fetch_insn(&mut self, phys_pc: u64) -> (u32, bool) {
+        if phys_pc >= DRAM_BASE {
+            let off = (phys_pc - DRAM_BASE) as usize;
+            let ram_slice = self.ram.as_slice();
+            if off + 1 < ram_slice.len() {
+                let lo = u16::from_le_bytes([ram_slice[off], ram_slice[off + 1]]);
+                if lo & 0x03 != 0x03 {
+                    // Compressed 16-bit instruction
+                    return (lo as u32, true);
+                }
+                if off + 3 < ram_slice.len() {
+                    let raw32 = u32::from_le_bytes([
+                        ram_slice[off],
+                        ram_slice[off + 1],
+                        ram_slice[off + 2],
+                        ram_slice[off + 3],
+                    ]);
+                    return (raw32, false);
+                }
+            }
+        }
+        // Fallback for non-DRAM (e.g., boot ROM)
+        let raw16 = self.read16(phys_pc);
+        if raw16 & 0x03 != 0x03 {
+            (raw16 as u32, true)
+        } else {
+            (self.read32(phys_pc), false)
+        }
+    }
+
     pub fn read16(&mut self, addr: u64) -> u16 {
         match self.route(addr) {
             (0, off) => {

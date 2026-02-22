@@ -162,6 +162,11 @@ pub fn save_snapshot(path: &Path, cpu: &Cpu, bus: &mut Bus) -> io::Result<()> {
     }
     w.write_u64(cpu.csrs.mtime);
 
+    // HPM counters (29 counters: 3-31)
+    for &ctr in &cpu.csrs.hpm_counters {
+        w.write_u64(ctr);
+    }
+
     // CLINT state
     w.write_u64(bus.clint.mtime());
     w.write_u64(bus.clint.mtimecmp());
@@ -251,6 +256,11 @@ pub fn load_snapshot(path: &Path, cpu: &mut Cpu, bus: &mut Bus) -> io::Result<()
         cpu.csrs.pmpaddr[i] = r.read_u64()?;
     }
     cpu.csrs.mtime = r.read_u64()?;
+
+    // HPM counters (29 counters: 3-31)
+    for i in 0..29 {
+        cpu.csrs.hpm_counters[i] = r.read_u64().unwrap_or(0);
+    }
 
     // Flush TLB after restoring CSRs (SATP may have changed)
     cpu.mmu.flush_tlb();

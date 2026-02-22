@@ -139,6 +139,37 @@ const SSTATUS_MASK: u64 = MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP | MSTATUS_SUM
 /// CSR address space size (12-bit addresses = 4096 entries)
 const CSR_COUNT: usize = 4096;
 
+/// Hardware Performance Monitor event types
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+#[allow(dead_code)]
+pub enum HpmEvent {
+    /// Event 1: Load instructions retired
+    Load = 1,
+    /// Event 2: Store instructions retired
+    Store = 2,
+    /// Event 3: Conditional branches retired
+    Branch = 3,
+    /// Event 4: Conditional branches taken
+    BranchTaken = 4,
+    /// Event 5: Exceptions taken
+    Exception = 5,
+    /// Event 6: Interrupts taken
+    Interrupt = 6,
+    /// Event 7: TLB misses
+    TlbMiss = 7,
+    /// Event 8: Atomic instructions (AMO/LR/SC)
+    Atomic = 8,
+    /// Event 9: System instructions (CSR, ECALL, EBREAK, FENCE, etc.)
+    System = 9,
+    /// Event 10: Floating-point instructions
+    FloatingPoint = 10,
+    /// Event 11: Vector instructions
+    Vector = 11,
+    /// Event 12: Compressed instructions (16-bit)
+    Compressed = 12,
+}
+
 pub struct CsrFile {
     /// Fixed array for all CSR registers (indexed by 12-bit address)
     regs: Box<[u64; CSR_COUNT]>,
@@ -148,6 +179,8 @@ pub struct CsrFile {
     pub pmpaddr: [u64; 16],
     /// Cached mtime from CLINT (updated each step for TIME CSR reads)
     pub mtime: u64,
+    /// Hardware performance counters 3-31 (29 counters)
+    pub hpm_counters: [u64; 29],
 }
 
 impl CsrFile {
@@ -179,6 +212,7 @@ impl CsrFile {
             pmpcfg: [0; 4],
             pmpaddr: [0; 16],
             mtime: 0,
+            hpm_counters: [0; 29],
         };
         // MISA: RV64IMAFDCVSU (G = IMAFD + Zicsr + Zifencei, V = Vector)
         let misa = (2u64 << 62)  // MXL = 64-bit
@@ -218,6 +252,29 @@ impl CsrFile {
     pub fn update_counters(&mut self, cycle: u64) {
         self.regs[MCYCLE as usize] = cycle;
         self.regs[MINSTRET as usize] = cycle; // 1:1 for now
+    }
+
+    /// Increment HPM counters matching the given event.
+    /// Checks mhpmevent selectors and mcountinhibit bits.
+    #[inline]
+    pub fn hpm_increment(&mut self, event: HpmEvent) {
+        let inhibit = self.regs[MCOUNTINHIBIT as usize];
+        let event_id = event as u64;
+        // Check counters 3-31 (indices 0-28 in hpm_counters)
+        for i in 0..29u16 {
+            let counter_idx = i + 3;
+            // Check mcountinhibit bit
+            if (inhibit >> counter_idx) & 1 != 0 {
+                continue;
+            }
+            // Check mhpmevent selector (low 12 bits = event ID)
+            let event_sel_addr = 0x323 + i;
+            let selector = self.regs[event_sel_addr as usize];
+            // Low 8 bits = event type; match if equal to our event
+            if (selector & 0xFF) == event_id {
+                self.hpm_counters[i as usize] = self.hpm_counters[i as usize].wrapping_add(1);
+            }
+        }
     }
 
     /// Check if a counter CSR is accessible from the given privilege mode.
@@ -306,14 +363,19 @@ impl CsrFile {
             MENVCFG => self.regs[MENVCFG as usize],
             MENVCFGH => 0, // RV64: high half is 0
             MCOUNTINHIBIT => self.regs[MCOUNTINHIBIT as usize],
-            // Machine HPM counters (mhpmcounter3-31) — all zero
-            0xB03..=0xB1F => 0,
+            // Machine HPM counters (mhpmcounter3-31)
+            0xB03..=0xB1F => self.hpm_counters[(addr - 0xB03) as usize],
             // Machine HPM event selectors (mhpmevent3-31)
             0x323..=0x33F => self.regs[addr as usize],
-            // Sscofpmf: scountovf — read-only overflow bitmap (always 0, no real HPM events)
-            SCOUNTOVF => 0,
-            // User HPM counters (hpmcounter3-31) — shadows, all zero
-            0xC03..=0xC1F => 0,
+            // Sscofpmf: scountovf — read-only overflow bitmap
+            SCOUNTOVF => {
+                // Bit N is set if hpmcounterN has overflowed (wrapped past u64::MAX)
+                // We approximate: bit set if counter's MSB is set (large value)
+                // In practice, real overflow requires OF bit in mhpmevent which we don't track yet
+                0
+            }
+            // User HPM counters (hpmcounter3-31) — shadows of machine counters
+            0xC03..=0xC1F => self.hpm_counters[(addr - 0xC03) as usize],
             // Smstateen CSRs
             MSTATEEN0 => self.regs[MSTATEEN0 as usize],
             MSTATEEN1 => self.regs[MSTATEEN1 as usize],
@@ -499,8 +561,10 @@ impl CsrFile {
             FCSR => {
                 self.regs[FCSR as usize] = val & 0xFF;
             }
-            // HPM counters — writable but no effect
-            0xB03..=0xB1F => {}
+            // HPM counters — writable (set counter value)
+            0xB03..=0xB1F => {
+                self.hpm_counters[(addr - 0xB03) as usize] = val;
+            }
             // HPM event selectors — store for Sscofpmf privilege filtering bits
             0x323..=0x33F => {
                 self.regs[addr as usize] = val;

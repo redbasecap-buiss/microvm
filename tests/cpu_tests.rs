@@ -10510,3 +10510,222 @@ fn test_dtb_advertises_sscofpmf() {
         "DTB should advertise sscofpmf"
     );
 }
+
+// ============================================================================
+// HPM Counter Tests (Zihpm extension)
+// ============================================================================
+
+#[test]
+fn test_hpm_counter_read_write() {
+    // mhpmcounter3-31 should be readable and writable
+    let (mut cpu, _bus) = run_program(&[], 0);
+    for addr in 0xB03u16..=0xB1F {
+        cpu.csrs.write(addr, 0xDEAD_BEEF);
+        assert_eq!(
+            cpu.csrs.read(addr),
+            0xDEAD_BEEF,
+            "mhpmcounter at 0x{addr:03X}"
+        );
+    }
+}
+
+#[test]
+fn test_hpm_user_counter_shadows_machine() {
+    // User-level hpmcounter3-31 (0xC03-0xC1F) should shadow machine counters
+    let (mut cpu, _bus) = run_program(&[], 0);
+    cpu.csrs.write(0xB03, 42);
+    assert_eq!(cpu.csrs.read(0xC03), 42);
+    cpu.csrs.write(0xB1F, 999);
+    assert_eq!(cpu.csrs.read(0xC1F), 999);
+}
+
+#[test]
+fn test_hpm_event_load_counting() {
+    // Configure mhpmevent3 to count loads (event 1), then execute a load
+    let (mut cpu, _bus) = run_program(&[], 0);
+    cpu.csrs.write(0x323, 1); // mhpmevent3 = Load event
+    assert_eq!(cpu.csrs.read(0xB03), 0);
+    cpu.csrs.hpm_increment(csr::HpmEvent::Load);
+    assert_eq!(cpu.csrs.read(0xB03), 1);
+    cpu.csrs.hpm_increment(csr::HpmEvent::Load);
+    assert_eq!(cpu.csrs.read(0xB03), 2);
+    // Store event should not increment the load counter
+    cpu.csrs.hpm_increment(csr::HpmEvent::Store);
+    assert_eq!(cpu.csrs.read(0xB03), 2);
+}
+
+#[test]
+fn test_hpm_event_store_counting() {
+    let (mut cpu, _bus) = run_program(&[], 0);
+    cpu.csrs.write(0x323, 2); // mhpmevent3 = Store event
+    cpu.csrs.hpm_increment(csr::HpmEvent::Store);
+    cpu.csrs.hpm_increment(csr::HpmEvent::Store);
+    cpu.csrs.hpm_increment(csr::HpmEvent::Store);
+    assert_eq!(cpu.csrs.read(0xB03), 3);
+}
+
+#[test]
+fn test_hpm_event_branch_counting() {
+    let (mut cpu, _bus) = run_program(&[], 0);
+    cpu.csrs.write(0x323, 3); // Branch event
+    cpu.csrs.write(0x324, 4); // BranchTaken event on counter 4
+    cpu.csrs.hpm_increment(csr::HpmEvent::Branch);
+    cpu.csrs.hpm_increment(csr::HpmEvent::BranchTaken);
+    assert_eq!(cpu.csrs.read(0xB03), 1); // 1 branch
+    assert_eq!(cpu.csrs.read(0xB04), 1); // 1 taken
+}
+
+#[test]
+fn test_hpm_mcountinhibit() {
+    // Counter should not increment when inhibited
+    let (mut cpu, _bus) = run_program(&[], 0);
+    cpu.csrs.write(0x323, 1); // mhpmevent3 = Load
+    cpu.csrs.write(csr::MCOUNTINHIBIT, 1 << 3); // Inhibit counter 3
+    cpu.csrs.hpm_increment(csr::HpmEvent::Load);
+    assert_eq!(cpu.csrs.read(0xB03), 0); // Should NOT increment
+    cpu.csrs.write(csr::MCOUNTINHIBIT, 0); // Remove inhibit
+    cpu.csrs.hpm_increment(csr::HpmEvent::Load);
+    assert_eq!(cpu.csrs.read(0xB03), 1); // Should increment now
+}
+
+#[test]
+fn test_hpm_multiple_counters_same_event() {
+    // Two counters configured to count the same event
+    let (mut cpu, _bus) = run_program(&[], 0);
+    cpu.csrs.write(0x323, 5); // mhpmevent3 = Exception
+    cpu.csrs.write(0x324, 5); // mhpmevent4 = Exception too
+    cpu.csrs.hpm_increment(csr::HpmEvent::Exception);
+    assert_eq!(cpu.csrs.read(0xB03), 1);
+    assert_eq!(cpu.csrs.read(0xB04), 1);
+}
+
+#[test]
+fn test_hpm_counter_wraps() {
+    // Counter should wrap around at u64::MAX
+    let (mut cpu, _bus) = run_program(&[], 0);
+    cpu.csrs.write(0x323, 1); // Load event
+    cpu.csrs.write(0xB03, u64::MAX); // Set counter to MAX
+    cpu.csrs.hpm_increment(csr::HpmEvent::Load);
+    assert_eq!(cpu.csrs.read(0xB03), 0); // Should wrap to 0
+}
+
+#[test]
+fn test_hpm_no_event_configured() {
+    // Counter with event=0 should not count anything
+    let (mut cpu, _bus) = run_program(&[], 0);
+    // mhpmevent3 = 0 (no event)
+    cpu.csrs.hpm_increment(csr::HpmEvent::Load);
+    cpu.csrs.hpm_increment(csr::HpmEvent::Store);
+    cpu.csrs.hpm_increment(csr::HpmEvent::Branch);
+    assert_eq!(cpu.csrs.read(0xB03), 0);
+}
+
+#[test]
+fn test_hpm_integrated_load_instruction() {
+    // Execute a real LD instruction and verify the HPM counter increments
+    // LD x1, 0(x0) = 0x00003083
+    let (mut cpu, mut bus) = run_program(&[0x00003083], 0);
+    cpu.csrs.write(0x323, 1); // mhpmevent3 = Load
+    cpu.step(&mut bus);
+    assert_eq!(cpu.csrs.read(0xB03), 1);
+}
+
+#[test]
+fn test_hpm_integrated_store_instruction() {
+    // SD x0, 0(x0) = 0x00003023
+    // But x0 is DRAM_BASE on reset... let's use a simpler approach
+    // SW x0, 8(x0) where x0=0 → stores to addr 8 which is RAM offset
+    // Actually, we need to use an address in DRAM range
+    // LUI x2, 0x80000 (set x2 = DRAM_BASE) then SW x0, 0(x2)
+    let instructions = [
+        0x80000137, // LUI x2, 0x80000
+        0x00012023, // SW x0, 0(x2)
+    ];
+    let (mut cpu, mut bus) = run_program(&instructions, 0);
+    cpu.csrs.write(0x323, 2); // mhpmevent3 = Store
+    cpu.step(&mut bus); // LUI
+    assert_eq!(cpu.csrs.read(0xB03), 0); // LUI is not a store
+    cpu.step(&mut bus); // SW
+    assert_eq!(cpu.csrs.read(0xB03), 1); // SW should count
+}
+
+#[test]
+fn test_hpm_integrated_branch_taken() {
+    // BEQ x0, x0, +4 = always taken
+    // BEQ: imm[12|10:5] rs2 rs1 000 imm[4:1|11] 1100011
+    // BEQ x0, x0, +4: offset=4 → imm_b=4 → b4_1=0b0010, rest=0
+    // = 0x00000263
+    let (mut cpu, mut bus) = run_program(&[0x00000263], 0);
+    cpu.csrs.write(0x323, 3); // Branch event
+    cpu.csrs.write(0x324, 4); // BranchTaken event
+    cpu.step(&mut bus);
+    assert_eq!(cpu.csrs.read(0xB03), 1); // Branch counted
+    assert_eq!(cpu.csrs.read(0xB04), 1); // Taken counted
+}
+
+// ============================================================================
+// Fast Instruction Fetch Tests
+// ============================================================================
+
+#[test]
+fn test_fetch_insn_32bit() {
+    let mut bus = Bus::new(64 * 1024);
+    let insn: u32 = 0x00000013; // NOP (addi x0, x0, 0)
+    bus.write32(DRAM_BASE, insn);
+    let (raw, is_compressed) = bus.fetch_insn(DRAM_BASE);
+    assert_eq!(raw, insn);
+    assert!(!is_compressed);
+}
+
+#[test]
+fn test_fetch_insn_compressed() {
+    let mut bus = Bus::new(64 * 1024);
+    // C.NOP = 0x0001 (compressed, bits [1:0] = 01, not 11)
+    bus.write16(DRAM_BASE, 0x0001);
+    let (raw, is_compressed) = bus.fetch_insn(DRAM_BASE);
+    assert_eq!(raw, 0x0001);
+    assert!(is_compressed);
+}
+
+#[test]
+fn test_fetch_insn_non_dram_fallback() {
+    // Fetch from address 0 (not DRAM) should use fallback path
+    let mut bus = Bus::new(64 * 1024);
+    let (raw, _is_compressed) = bus.fetch_insn(0);
+    // Should not panic, returns 0 (unmapped)
+    assert_eq!(raw, 0);
+}
+
+#[test]
+fn test_dtb_advertises_zihpm() {
+    let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "", false, None);
+    let dtb_str = String::from_utf8_lossy(&dtb);
+    assert!(dtb_str.contains("zihpm"), "DTB should advertise zihpm");
+}
+
+#[test]
+fn test_hpm_all_event_types() {
+    // Verify all event types can be configured and counted
+    let (mut cpu, _bus) = run_program(&[], 0);
+    let events = [
+        (1u64, csr::HpmEvent::Load),
+        (2, csr::HpmEvent::Store),
+        (3, csr::HpmEvent::Branch),
+        (4, csr::HpmEvent::BranchTaken),
+        (5, csr::HpmEvent::Exception),
+        (6, csr::HpmEvent::Interrupt),
+        (7, csr::HpmEvent::TlbMiss),
+        (8, csr::HpmEvent::Atomic),
+        (9, csr::HpmEvent::System),
+        (10, csr::HpmEvent::FloatingPoint),
+        (11, csr::HpmEvent::Vector),
+        (12, csr::HpmEvent::Compressed),
+    ];
+    for (i, (event_id, event)) in events.iter().enumerate() {
+        let sel_addr = 0x323 + i as u16;
+        let ctr_addr = 0xB03 + i as u16;
+        cpu.csrs.write(sel_addr, *event_id);
+        cpu.csrs.hpm_increment(*event);
+        assert_eq!(cpu.csrs.read(ctr_addr), 1, "Event {:?} should count", event);
+    }
+}

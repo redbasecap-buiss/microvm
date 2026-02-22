@@ -296,6 +296,21 @@ pub fn execute(cpu: &mut Cpu, bus: &mut Bus, raw: u32, inst_len: u64) -> bool {
         }
     }
 
+    // HPM event counting based on opcode class
+    match opcode {
+        0x03 | 0x07 => cpu.csrs.hpm_increment(csr::HpmEvent::Load),
+        0x23 | 0x27 => cpu.csrs.hpm_increment(csr::HpmEvent::Store),
+        0x63 => cpu.csrs.hpm_increment(csr::HpmEvent::Branch),
+        0x2F => cpu.csrs.hpm_increment(csr::HpmEvent::Atomic),
+        0x73 | 0x0F => cpu.csrs.hpm_increment(csr::HpmEvent::System),
+        0x43 | 0x47 | 0x4B | 0x4F | 0x53 => cpu.csrs.hpm_increment(csr::HpmEvent::FloatingPoint),
+        0x57 => cpu.csrs.hpm_increment(csr::HpmEvent::Vector),
+        _ => {}
+    }
+    if inst_len == 2 {
+        cpu.csrs.hpm_increment(csr::HpmEvent::Compressed);
+    }
+
     match opcode {
         0x37 => op_lui(cpu, &inst, inst_len),
         0x17 => op_auipc(cpu, &inst, inst_len),
@@ -354,6 +369,7 @@ fn op_branch(cpu: &mut Cpu, inst: &Instruction, len: u64) {
         _ => false,
     };
     if taken {
+        cpu.csrs.hpm_increment(csr::HpmEvent::BranchTaken);
         cpu.pc = cpu.pc.wrapping_add(inst.imm_b as u64);
     } else {
         cpu.pc += len;
