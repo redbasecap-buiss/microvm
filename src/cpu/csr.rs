@@ -71,6 +71,29 @@ pub const MCONFIGPTR: u16 = 0xF15;
 // Sstc extension — supervisor timer compare
 pub const STIMECMP: u16 = 0x14D;
 
+// Smstateen extension — state enable CSRs
+pub const MSTATEEN0: u16 = 0x30C;
+pub const MSTATEEN1: u16 = 0x30D;
+pub const MSTATEEN2: u16 = 0x30E;
+pub const MSTATEEN3: u16 = 0x30F;
+pub const SSTATEEN0: u16 = 0x10C;
+pub const SSTATEEN1: u16 = 0x10D;
+pub const SSTATEEN2: u16 = 0x10E;
+pub const SSTATEEN3: u16 = 0x10F;
+
+// Smstateen bit masks
+/// Bit 63: controls whether sstateen0 is accessible from S-mode
+pub const STATEEN_SE0: u64 = 1u64 << 63;
+/// Bit 62: controls whether henvcfg/senvcfg PBMTE/ADUE are accessible
+#[allow(dead_code)]
+pub const STATEEN_ENVCFG: u64 = 1u64 << 62;
+/// Bit 57: controls whether context register (scontext) is accessible
+#[allow(dead_code)]
+pub const STATEEN_CONTEXT: u64 = 1u64 << 57;
+/// Bit 56: controls whether IMSIC (AIA) state is accessible
+#[allow(dead_code)]
+pub const STATEEN_AIA: u64 = 1u64 << 56;
+
 // Vector extension CSRs
 pub const VSTART: u16 = 0x008;
 pub const VXSAT: u16 = 0x009;
@@ -171,6 +194,12 @@ impl CsrFile {
         csrs.regs[MENVCFG as usize] = (1u64 << 63) | (1u64 << 61);
         // stimecmp defaults to max (no interrupt)
         csrs.regs[STIMECMP as usize] = u64::MAX;
+        // Smstateen: default all bits set (all state accessible)
+        csrs.regs[MSTATEEN0 as usize] = u64::MAX;
+        csrs.regs[MSTATEEN1 as usize] = u64::MAX;
+        csrs.regs[MSTATEEN2 as usize] = u64::MAX;
+        csrs.regs[MSTATEEN3 as usize] = u64::MAX;
+        // sstateen defaults to 0 — S-mode sets what U-mode can access
         // Vector extension: VLENB = VLEN/8
         csrs.regs[VLENB as usize] = super::vector::VLENB as u64;
         // vtype starts as vill (no configuration set yet)
@@ -210,6 +239,22 @@ impl CsrFile {
     /// Check if stimecmp timer has fired (Sstc extension)
     pub fn stimecmp_pending(&self) -> bool {
         self.mtime >= self.regs[STIMECMP as usize]
+    }
+
+    /// Check if a stateen CSR is accessible from the given privilege mode.
+    /// M-mode can always access mstateen*. S-mode can access sstateen* only
+    /// if the corresponding mstateen* bit 63 (SE0) is set.
+    pub fn stateen_accessible(&self, csr_addr: u16, mode: PrivilegeMode) -> bool {
+        match mode {
+            PrivilegeMode::Machine => true,
+            PrivilegeMode::Supervisor | PrivilegeMode::User => match csr_addr {
+                SSTATEEN0 => self.regs[MSTATEEN0 as usize] & STATEEN_SE0 != 0,
+                SSTATEEN1 => self.regs[MSTATEEN1 as usize] & STATEEN_SE0 != 0,
+                SSTATEEN2 => self.regs[MSTATEEN2 as usize] & STATEEN_SE0 != 0,
+                SSTATEEN3 => self.regs[MSTATEEN3 as usize] & STATEEN_SE0 != 0,
+                _ => true,
+            },
+        }
     }
 
     /// Mark floating-point state as Dirty (FS=3) in mstatus, and set SD bit
@@ -260,6 +305,15 @@ impl CsrFile {
             0x323..=0x33F => 0,
             // User HPM counters (hpmcounter3-31) — shadows, all zero
             0xC03..=0xC1F => 0,
+            // Smstateen CSRs
+            MSTATEEN0 => self.regs[MSTATEEN0 as usize],
+            MSTATEEN1 => self.regs[MSTATEEN1 as usize],
+            MSTATEEN2 => self.regs[MSTATEEN2 as usize],
+            MSTATEEN3 => self.regs[MSTATEEN3 as usize],
+            SSTATEEN0 => self.regs[SSTATEEN0 as usize] & self.regs[MSTATEEN0 as usize],
+            SSTATEEN1 => self.regs[SSTATEEN1 as usize] & self.regs[MSTATEEN1 as usize],
+            SSTATEEN2 => self.regs[SSTATEEN2 as usize] & self.regs[MSTATEEN2 as usize],
+            SSTATEEN3 => self.regs[SSTATEEN3 as usize] & self.regs[MSTATEEN3 as usize],
             // Vector CSRs
             VSTART => self.regs[VSTART as usize],
             VXSAT => self.regs[VXSAT as usize] & 1,
@@ -438,6 +492,23 @@ impl CsrFile {
             }
             // HPM counters and event selectors — writable but no effect
             0xB03..=0xB1F | 0x323..=0x33F => {}
+            // Smstateen CSRs
+            MSTATEEN0 | MSTATEEN1 | MSTATEEN2 | MSTATEEN3 => {
+                self.regs[addr as usize] = val;
+            }
+            SSTATEEN0 => {
+                // S-mode can only set bits that M-mode allows
+                self.regs[SSTATEEN0 as usize] = val & self.regs[MSTATEEN0 as usize];
+            }
+            SSTATEEN1 => {
+                self.regs[SSTATEEN1 as usize] = val & self.regs[MSTATEEN1 as usize];
+            }
+            SSTATEEN2 => {
+                self.regs[SSTATEEN2 as usize] = val & self.regs[MSTATEEN2 as usize];
+            }
+            SSTATEEN3 => {
+                self.regs[SSTATEEN3 as usize] = val & self.regs[MSTATEEN3 as usize];
+            }
             // Vector CSRs
             VSTART => self.regs[VSTART as usize] = val,
             VXSAT => self.regs[VXSAT as usize] = val & 1,

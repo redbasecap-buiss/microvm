@@ -1323,6 +1323,16 @@ fn op_system(cpu: &mut Cpu, bus: &mut Bus, inst: &Instruction, len: u64) -> bool
         return true;
     }
 
+    // Smstateen: check sstateen* accessibility from S-mode
+    if matches!(
+        csr_addr,
+        csr::SSTATEEN0 | csr::SSTATEEN1 | csr::SSTATEEN2 | csr::SSTATEEN3
+    ) && !cpu.csrs.stateen_accessible(csr_addr, cpu.mode)
+    {
+        cpu.handle_exception(2, inst.raw as u64, bus); // Illegal instruction
+        return true;
+    }
+
     let old_val = cpu.csrs.read(csr_addr);
 
     let write_val = match inst.funct3 {

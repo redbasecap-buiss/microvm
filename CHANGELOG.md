@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.58.0 — Smstateen Extension (State Enable CSRs)
+
+### Major Features
+- **Smstateen extension**: Machine-level state enable registers for controlling S/U-mode access to extensions
+  - `mstateen0-3`: Machine-level state enable CSRs — control which extension state S-mode can access
+  - `sstateen0-3`: Supervisor-level state enable CSRs — control which extension state U-mode can access
+  - sstateen reads are masked by corresponding mstateen (S-mode only sees bits M-mode allows)
+  - sstateen writes are masked by mstateen (S-mode cannot enable state that M-mode disabled)
+  - SE0 bit (bit 63) in mstateen0 gates S-mode access to sstateen0 itself
+  - S-mode access to sstateen* raises illegal instruction when SE0 is clear
+  - Default: all mstateen bits set (all state accessible), matching typical Linux boot expectations
+- **Ssstateen**: Supervisor-visible subset automatically available with Smstateen
+- **DTB updated**: ISA string and `riscv,isa-extensions` now advertise `smstateen` and `ssstateen`
+
+### New Tests
+- `test_mstateen0_default_all_ones`: mstateen0 defaults to all-ones
+- `test_sstateen0_masked_by_mstateen0`: sstateen0 reads are masked by mstateen0
+- `test_sstateen0_write_masked_by_mstateen0`: sstateen0 writes are masked by mstateen0
+- `test_stateen_smode_access_blocked`: S-mode can access sstateen0 when SE0 is set
+- `test_stateen_smode_access_denied_when_se0_clear`: S-mode access denied when SE0 cleared
+- `test_mstateen_always_accessible_from_mmode`: M-mode always has access regardless of SE0
+- `test_dtb_advertises_smstateen`: DTB extension advertisement
+
+### Stats
+- 411 integration tests, all passing
+- 0 clippy warnings
+
 ## v0.57.0 — Svnapot Extension (64KiB Contiguous Pages)
 
 ### Major Features

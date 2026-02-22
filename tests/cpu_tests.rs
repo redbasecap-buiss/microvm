@@ -10044,3 +10044,94 @@ fn test_dtb_advertises_svnapot() {
     let dtb_str = String::from_utf8_lossy(&dtb);
     assert!(dtb_str.contains("svnapot"), "DTB should advertise svnapot");
 }
+
+// ============================================================
+// Smstateen extension tests
+// ============================================================
+
+#[test]
+fn test_mstateen0_default_all_ones() {
+    let cpu = microvm::cpu::Cpu::new();
+    assert_eq!(cpu.csrs.read(microvm::cpu::csr::MSTATEEN0), u64::MAX);
+}
+
+#[test]
+fn test_sstateen0_masked_by_mstateen0() {
+    let mut cpu = microvm::cpu::Cpu::new();
+    // Write all-ones to sstateen0
+    cpu.csrs.write(microvm::cpu::csr::SSTATEEN0, u64::MAX);
+    assert_eq!(cpu.csrs.read(microvm::cpu::csr::SSTATEEN0), u64::MAX);
+
+    // Now restrict mstateen0 — clear bit 63
+    cpu.csrs
+        .write(microvm::cpu::csr::MSTATEEN0, u64::MAX & !(1u64 << 63));
+    // Reading sstateen0 should have bit 63 cleared (masked)
+    let val = cpu.csrs.read(microvm::cpu::csr::SSTATEEN0);
+    assert_eq!(
+        val & (1u64 << 63),
+        0,
+        "sstateen0 bit 63 should be masked by mstateen0"
+    );
+}
+
+#[test]
+fn test_sstateen0_write_masked_by_mstateen0() {
+    let mut cpu = microvm::cpu::Cpu::new();
+    // Clear mstateen0 bit 62
+    cpu.csrs.write(microvm::cpu::csr::MSTATEEN0, !(1u64 << 62));
+    // Try to set bit 62 in sstateen0
+    cpu.csrs.write(microvm::cpu::csr::SSTATEEN0, 1u64 << 62);
+    // Should be masked out
+    let val = cpu.csrs.read(microvm::cpu::csr::SSTATEEN0);
+    assert_eq!(
+        val & (1u64 << 62),
+        0,
+        "sstateen0 bit 62 should not be settable when mstateen0 bit 62 is clear"
+    );
+}
+
+#[test]
+fn test_stateen_smode_access_blocked() {
+    let cpu = microvm::cpu::Cpu::new();
+    // Default: mstateen0 has SE0 (bit 63) set, so sstateen0 is accessible
+    assert!(cpu.csrs.stateen_accessible(
+        microvm::cpu::csr::SSTATEEN0,
+        microvm::cpu::PrivilegeMode::Supervisor
+    ));
+}
+
+#[test]
+fn test_stateen_smode_access_denied_when_se0_clear() {
+    let mut cpu = microvm::cpu::Cpu::new();
+    // Clear SE0 bit in mstateen0
+    cpu.csrs
+        .write(microvm::cpu::csr::MSTATEEN0, u64::MAX & !(1u64 << 63));
+    assert!(!cpu.csrs.stateen_accessible(
+        microvm::cpu::csr::SSTATEEN0,
+        microvm::cpu::PrivilegeMode::Supervisor
+    ));
+}
+
+#[test]
+fn test_mstateen_always_accessible_from_mmode() {
+    let mut cpu = microvm::cpu::Cpu::new();
+    cpu.csrs.write(microvm::cpu::csr::MSTATEEN0, 0);
+    assert!(cpu.csrs.stateen_accessible(
+        microvm::cpu::csr::SSTATEEN0,
+        microvm::cpu::PrivilegeMode::Machine
+    ));
+}
+
+#[test]
+fn test_dtb_advertises_smstateen() {
+    let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "", false, None);
+    let dtb_str = String::from_utf8_lossy(&dtb);
+    assert!(
+        dtb_str.contains("smstateen"),
+        "DTB should advertise smstateen"
+    );
+    assert!(
+        dtb_str.contains("ssstateen"),
+        "DTB should advertise ssstateen"
+    );
+}
