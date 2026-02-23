@@ -3030,6 +3030,32 @@ fn execute_v_crypto(cpu: &mut Cpu, raw: u32, inst_len: u64) -> bool {
                 aes_write_group(cpu, vd, base, &new_key);
             }
         }
+        0b101000 if vs1 == 17 => {
+            // vgmul.vv vd, vs2 — GHASH multiply (Zvkg)
+            for g in 0..num_groups {
+                let base = g * 4;
+                let y = aes_read_group(cpu, vd, base);
+                let h = aes_read_group(cpu, vs2, base);
+                let result =
+                    ghash_multiply(brev8_128(u32x4_to_u128(y)), brev8_128(u32x4_to_u128(h)));
+                aes_write_group(cpu, vd, base, &u128_to_u32x4(brev8_128(result)));
+            }
+        }
+        0b101100 => {
+            // vghsh.vv vd, vs2, vs1 — GHASH add-multiply (Zvkg)
+            for g in 0..num_groups {
+                let base = g * 4;
+                let y = aes_read_group(cpu, vd, base);
+                let x = aes_read_group(cpu, vs1, base);
+                let h = aes_read_group(cpu, vs2, base);
+                let y128 = u32x4_to_u128(y);
+                let x128 = u32x4_to_u128(x);
+                let s = brev8_128(y128 ^ x128);
+                let hh = brev8_128(u32x4_to_u128(h));
+                let z = ghash_multiply(s, hh);
+                aes_write_group(cpu, vd, base, &u128_to_u32x4(brev8_128(z)));
+            }
+        }
         0b101010 => {
             // vaeskf2.vi — AES-256 key schedule
             let rnum = vs1 as u32;
@@ -3355,6 +3381,57 @@ fn sha2_compress_64(cpu: &mut Cpu, vd: usize, vs1: usize, vs2: usize, base: usiz
     a = t1.wrapping_add(t2);
 
     sha2_write_group_u64(cpu, vd, base, &[f, e, b, a]);
+}
+
+// ============================================================================
+// Zvkg: GHASH (Galois field multiply for AES-GCM)
+// ============================================================================
+
+/// Reverse bits within each byte of a 128-bit value.
+#[inline]
+fn brev8_128(x: u128) -> u128 {
+    let mut result = 0u128;
+    for i in 0..16 {
+        let byte = ((x >> (i * 8)) & 0xFF) as u8;
+        let rev = byte.reverse_bits();
+        result |= (rev as u128) << (i * 8);
+    }
+    result
+}
+
+/// Convert 4×u32 (little-endian element group) to u128.
+#[inline]
+fn u32x4_to_u128(g: [u32; 4]) -> u128 {
+    g[0] as u128 | ((g[1] as u128) << 32) | ((g[2] as u128) << 64) | ((g[3] as u128) << 96)
+}
+
+/// Convert u128 back to 4×u32.
+#[inline]
+fn u128_to_u32x4(v: u128) -> [u32; 4] {
+    [
+        v as u32,
+        (v >> 32) as u32,
+        (v >> 64) as u32,
+        (v >> 96) as u32,
+    ]
+}
+
+/// Multiply two 128-bit polynomials over GF(2^128) with GHASH reduction polynomial.
+/// Reduction polynomial: x^128 + x^7 + x^2 + x + 1 (0x87 in the low bits).
+fn ghash_multiply(a: u128, b: u128) -> u128 {
+    let mut z: u128 = 0;
+    let mut h = b;
+    for bit in 0..128 {
+        if (a >> bit) & 1 == 1 {
+            z ^= h;
+        }
+        let reduce = (h >> 127) & 1 == 1;
+        h <<= 1;
+        if reduce {
+            h ^= 0x87;
+        }
+    }
+    z
 }
 
 // ============================================================================

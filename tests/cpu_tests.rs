@@ -11867,3 +11867,157 @@ fn test_zvknhb_in_isa_string() {
         "DTB should advertise zvknhb extension"
     );
 }
+
+// =========================================================================
+// Zvkg tests — Vector GHASH (Galois field multiply for AES-GCM)
+// =========================================================================
+
+#[test]
+fn test_zvkg_vgmul() {
+    // vgmul.vv vd, vs2 — GHASH multiply
+    // funct6=0b101000, vs1=17
+    let prog = &[
+        vsetivli(0, 4, 0b010_000),    // e32,m1, VL=4
+        op_p_mvv(0b101000, 2, 17, 4), // vgmul.vv v2, v4
+    ];
+    let (mut cpu, mut bus) = run_program(prog, 0);
+    // Set up: vd = arbitrary nonzero, vs2 = zero → result should be zero
+    cpu.vregs.write_elem(2, 32, 0, 0xdeadbeef_u64);
+    cpu.vregs.write_elem(2, 32, 1, 0xcafebabe_u64);
+    cpu.vregs.write_elem(2, 32, 2, 0x12345678_u64);
+    cpu.vregs.write_elem(2, 32, 3, 0x9abcdef0_u64);
+    // H = nonzero
+    cpu.vregs.write_elem(4, 32, 0, 0xaabbccdd_u64);
+    cpu.vregs.write_elem(4, 32, 1, 0x11223344_u64);
+    cpu.vregs.write_elem(4, 32, 2, 0x55667788_u64);
+    cpu.vregs.write_elem(4, 32, 3, 0x99001122_u64);
+    cpu.step(&mut bus); // vsetivli
+    cpu.step(&mut bus); // vgmul.vv
+                        // Result should differ from input (multiplication changes the value)
+    let r0 = cpu.vregs.read_elem(2, 32, 0) as u32;
+    let r1 = cpu.vregs.read_elem(2, 32, 1) as u32;
+    assert!(
+        r0 != 0xdeadbeef || r1 != 0xcafebabe,
+        "vgmul should change the result"
+    );
+}
+
+#[test]
+fn test_zvkg_vgmul_zero() {
+    // Multiply by zero should give zero
+    let prog = &[
+        vsetivli(0, 4, 0b010_000),
+        op_p_mvv(0b101000, 2, 17, 4), // vgmul.vv v2, v4
+    ];
+    let (mut cpu, mut bus) = run_program(prog, 0);
+    cpu.vregs.write_elem(2, 32, 0, 0xdeadbeef_u64);
+    cpu.vregs.write_elem(2, 32, 1, 0xcafebabe_u64);
+    cpu.vregs.write_elem(2, 32, 2, 0x12345678_u64);
+    cpu.vregs.write_elem(2, 32, 3, 0x9abcdef0_u64);
+    for i in 0..4 {
+        cpu.vregs.write_elem(4, 32, i, 0_u64);
+    }
+    cpu.step(&mut bus);
+    cpu.step(&mut bus);
+    for i in 0..4 {
+        assert_eq!(
+            cpu.vregs.read_elem(2, 32, i),
+            0,
+            "x*0 should be 0 at elem {}",
+            i
+        );
+    }
+}
+
+#[test]
+fn test_zvkg_vghsh() {
+    // vghsh.vv vd, vs2, vs1 — GHASH add-multiply
+    // Y_new = (Y ^ X) * H
+    // With X=0, Y_new = Y * H (same as vgmul)
+    let prog_ghsh = &[
+        vsetivli(0, 4, 0b010_000),
+        op_p_mvv(0b101100, 2, 6, 4), // vghsh.vv v2, v4, v6
+    ];
+    let prog_gmul = &[
+        vsetivli(0, 4, 0b010_000),
+        op_p_mvv(0b101000, 2, 17, 4), // vgmul.vv v2, v4
+    ];
+    let y = [0xaabbccdd_u64, 0x11223344, 0x55667788, 0x99001122];
+    let h = [0xdeadbeef_u64, 0xcafebabe, 0x12345678, 0x9abcdef0];
+
+    // Run vghsh with X=0
+    let (mut cpu, mut bus) = run_program(prog_ghsh, 0);
+    for i in 0..4 {
+        cpu.vregs.write_elem(2, 32, i, y[i]);
+        cpu.vregs.write_elem(4, 32, i, h[i]);
+        cpu.vregs.write_elem(6, 32, i, 0_u64); // X=0
+    }
+    cpu.step(&mut bus);
+    cpu.step(&mut bus);
+    let ghsh_result: Vec<u64> = (0..4).map(|i| cpu.vregs.read_elem(2, 32, i)).collect();
+
+    // Run vgmul with same Y, H
+    let (mut cpu2, mut bus2) = run_program(prog_gmul, 0);
+    for i in 0..4 {
+        cpu2.vregs.write_elem(2, 32, i, y[i]);
+        cpu2.vregs.write_elem(4, 32, i, h[i]);
+    }
+    cpu2.step(&mut bus2);
+    cpu2.step(&mut bus2);
+    let gmul_result: Vec<u64> = (0..4).map(|i| cpu2.vregs.read_elem(2, 32, i)).collect();
+
+    assert_eq!(
+        ghsh_result, gmul_result,
+        "vghsh with X=0 should equal vgmul"
+    );
+}
+
+#[test]
+fn test_zvkg_vghsh_xor_effect() {
+    // Verify X has an effect: vghsh with X!=0 should differ from X=0
+    let prog = &[
+        vsetivli(0, 4, 0b010_000),
+        op_p_mvv(0b101100, 2, 6, 4), // vghsh.vv v2, v4, v6
+    ];
+    let y = [0xaabbccdd_u64, 0x11223344, 0x55667788, 0x99001122];
+    let h = [0xdeadbeef_u64, 0xcafebabe, 0x12345678, 0x9abcdef0];
+
+    let run = |x_vals: [u64; 4]| -> Vec<u64> {
+        let (mut cpu, mut bus) = run_program(prog, 0);
+        for i in 0..4 {
+            cpu.vregs.write_elem(2, 32, i, y[i]);
+            cpu.vregs.write_elem(4, 32, i, h[i]);
+            cpu.vregs.write_elem(6, 32, i, x_vals[i]);
+        }
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+        (0..4).map(|i| cpu.vregs.read_elem(2, 32, i)).collect()
+    };
+
+    let r_zero = run([0, 0, 0, 0]);
+    let r_nonzero = run([0x11111111, 0x22222222, 0x33333333, 0x44444444]);
+    assert_ne!(
+        r_zero, r_nonzero,
+        "Different X should produce different GHASH results"
+    );
+}
+
+#[test]
+fn test_zvkg_disassembly() {
+    let gmul = op_p_mvv(0b101000, 2, 17, 4);
+    let ghsh = op_p_mvv(0b101100, 2, 6, 4);
+    let d_gmul = microvm::cpu::disasm::disassemble(gmul, 0);
+    let d_ghsh = microvm::cpu::disasm::disassemble(ghsh, 0);
+    assert!(d_gmul.contains("vgmul"), "Expected vgmul, got: {}", d_gmul);
+    assert!(d_ghsh.contains("vghsh"), "Expected vghsh, got: {}", d_ghsh);
+}
+
+#[test]
+fn test_zvkg_in_isa_string() {
+    let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "", false, None);
+    let dtb_str = String::from_utf8_lossy(&dtb);
+    assert!(
+        dtb_str.contains("zvkg"),
+        "DTB should advertise zvkg extension"
+    );
+}

@@ -609,6 +609,7 @@ fn disasm_v_crypto(raw: u32, vd: usize, vs1: usize, vs2: usize) -> String {
                 1 => "vaesdf.vv",
                 2 => "vaesem.vv",
                 3 => "vaesef.vv",
+                17 => return format!("vgmul.vv v{}, v{}", vd, vs2),
                 _ => return format!("vaes?   v{}, v{}", vd, vs2),
             };
             format!("{:<8}v{}, v{}", op, vd, vs2)
@@ -625,6 +626,7 @@ fn disasm_v_crypto(raw: u32, vd: usize, vs1: usize, vs2: usize) -> String {
         }
         0b100010 => format!("vaeskf1.vi v{}, v{}, {}", vd, vs2, vs1),
         0b101010 => format!("vaeskf2.vi v{}, v{}, {}", vd, vs2, vs1),
+        0b101100 => format!("vghsh.vv v{}, v{}, v{}", vd, vs2, vs1),
         0b101101 => format!("vsha2ms.vv v{}, v{}, v{}", vd, vs2, vs1),
         0b101110 => format!("vsha2ch.vv v{}, v{}, v{}", vd, vs2, vs1),
         0b101111 => format!("vsha2cl.vv v{}, v{}, v{}", vd, vs2, vs1),
@@ -979,10 +981,12 @@ pub fn mnemonic(inst: u32) -> &'static str {
             }
         }
         0x77 => {
-            // OP-P: Zvkned/Zvknhb vector crypto
+            // OP-P: Zvkned/Zvknhb/Zvkg vector crypto
             let f6 = (inst >> 26) & 0x3F;
             if f6 == 0b101101 || f6 == 0b101110 || f6 == 0b101111 {
                 "vsha2"
+            } else if f6 == 0b101100 {
+                "vghash"
             } else {
                 "vaes"
             }
