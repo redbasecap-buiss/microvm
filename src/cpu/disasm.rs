@@ -66,6 +66,11 @@ fn csr_name(addr: u16) -> &'static str {
         0xF12 => "marchid",
         0xF13 => "mimpid",
         0xF14 => "mhartid",
+        0x7A0 => "tselect",
+        0x7A1 => "tdata1",
+        0x7A2 => "tdata2",
+        0x7A3 => "tdata3",
+        0x7A4 => "tinfo",
         _ => "",
     }
 }

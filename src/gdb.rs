@@ -239,12 +239,12 @@ impl GdbServer {
                 CommandResult::Step
             }
             b'Z' => {
-                // Insert breakpoint: Z0,addr,kind
-                self.insert_breakpoint(cmd)
+                // Insert breakpoint: Z<type>,addr,kind
+                self.insert_breakpoint(cmd, cpu)
             }
             b'z' => {
-                // Remove breakpoint: z0,addr,kind
-                self.remove_breakpoint(cmd)
+                // Remove breakpoint: z<type>,addr,kind
+                self.remove_breakpoint(cmd, cpu)
             }
             b'D' => {
                 // Detach
@@ -338,48 +338,113 @@ impl GdbServer {
         }
     }
 
-    fn insert_breakpoint(&mut self, cmd: &str) -> CommandResult {
-        // Z0,addr,kind — software breakpoint
+    fn insert_breakpoint(&mut self, cmd: &str, cpu: &mut Cpu) -> CommandResult {
+        // Z<type>,addr,kind
+        // Type 0: software breakpoint, 1: hardware breakpoint,
+        // 2: write watchpoint, 3: read watchpoint, 4: access watchpoint
         let parts: Vec<&str> = cmd[1..].split(',').collect();
         if parts.len() < 2 {
             return CommandResult::Reply("E01".to_string());
         }
         let bp_type = parts[0];
-        if bp_type != "0" {
-            // Only software breakpoints supported
-            return CommandResult::Reply(String::new());
-        }
-        if let Ok(addr) = u64::from_str_radix(parts[1], 16) {
-            if !self.breakpoints.contains(&addr) {
-                self.breakpoints.push(addr);
+        let addr = match u64::from_str_radix(parts[1], 16) {
+            Ok(a) => a,
+            Err(_) => return CommandResult::Reply("E01".to_string()),
+        };
+        match bp_type {
+            "0" => {
+                // Software breakpoint
+                if !self.breakpoints.contains(&addr) {
+                    self.breakpoints.push(addr);
+                }
+                CommandResult::Reply("OK".to_string())
             }
-            CommandResult::Reply("OK".to_string())
-        } else {
-            CommandResult::Reply("E01".to_string())
+            "1" => {
+                // Hardware breakpoint (execute)
+                use crate::cpu::trigger::TriggerAccess;
+                match cpu.triggers.set_breakpoint(addr, TriggerAccess::Execute) {
+                    Some(_) => CommandResult::Reply("OK".to_string()),
+                    None => CommandResult::Reply("E0E".to_string()), // No free slots
+                }
+            }
+            "2" => {
+                // Write watchpoint
+                use crate::cpu::trigger::TriggerAccess;
+                match cpu.triggers.set_breakpoint(addr, TriggerAccess::Store) {
+                    Some(_) => CommandResult::Reply("OK".to_string()),
+                    None => CommandResult::Reply("E0E".to_string()),
+                }
+            }
+            "3" => {
+                // Read watchpoint
+                use crate::cpu::trigger::TriggerAccess;
+                match cpu.triggers.set_breakpoint(addr, TriggerAccess::Load) {
+                    Some(_) => CommandResult::Reply("OK".to_string()),
+                    None => CommandResult::Reply("E0E".to_string()),
+                }
+            }
+            "4" => {
+                // Access watchpoint (read+write) — use two trigger slots
+                use crate::cpu::trigger::TriggerAccess;
+                let r = cpu.triggers.set_breakpoint(addr, TriggerAccess::Load);
+                let w = cpu.triggers.set_breakpoint(addr, TriggerAccess::Store);
+                if r.is_some() && w.is_some() {
+                    CommandResult::Reply("OK".to_string())
+                } else {
+                    // Clean up partial allocation
+                    cpu.triggers.clear_breakpoint(addr, TriggerAccess::Load);
+                    cpu.triggers.clear_breakpoint(addr, TriggerAccess::Store);
+                    CommandResult::Reply("E0E".to_string())
+                }
+            }
+            _ => CommandResult::Reply(String::new()),
         }
     }
 
-    fn remove_breakpoint(&mut self, cmd: &str) -> CommandResult {
+    fn remove_breakpoint(&mut self, cmd: &str, cpu: &mut Cpu) -> CommandResult {
         let parts: Vec<&str> = cmd[1..].split(',').collect();
         if parts.len() < 2 {
             return CommandResult::Reply("E01".to_string());
         }
         let bp_type = parts[0];
-        if bp_type != "0" {
-            return CommandResult::Reply(String::new());
-        }
-        if let Ok(addr) = u64::from_str_radix(parts[1], 16) {
-            self.breakpoints.retain(|&a| a != addr);
-            CommandResult::Reply("OK".to_string())
-        } else {
-            CommandResult::Reply("E01".to_string())
+        let addr = match u64::from_str_radix(parts[1], 16) {
+            Ok(a) => a,
+            Err(_) => return CommandResult::Reply("E01".to_string()),
+        };
+        match bp_type {
+            "0" => {
+                self.breakpoints.retain(|&a| a != addr);
+                CommandResult::Reply("OK".to_string())
+            }
+            "1" => {
+                use crate::cpu::trigger::TriggerAccess;
+                cpu.triggers.clear_breakpoint(addr, TriggerAccess::Execute);
+                CommandResult::Reply("OK".to_string())
+            }
+            "2" => {
+                use crate::cpu::trigger::TriggerAccess;
+                cpu.triggers.clear_breakpoint(addr, TriggerAccess::Store);
+                CommandResult::Reply("OK".to_string())
+            }
+            "3" => {
+                use crate::cpu::trigger::TriggerAccess;
+                cpu.triggers.clear_breakpoint(addr, TriggerAccess::Load);
+                CommandResult::Reply("OK".to_string())
+            }
+            "4" => {
+                use crate::cpu::trigger::TriggerAccess;
+                cpu.triggers.clear_breakpoint(addr, TriggerAccess::Load);
+                cpu.triggers.clear_breakpoint(addr, TriggerAccess::Store);
+                CommandResult::Reply("OK".to_string())
+            }
+            _ => CommandResult::Reply(String::new()),
         }
     }
 
     fn handle_query(&self, cmd: &str) -> CommandResult {
         if cmd.starts_with("qSupported") {
             CommandResult::Reply(
-                "PacketSize=4096;swbreak+;hwbreak-;qXfer:features:read+".to_string(),
+                "PacketSize=4096;swbreak+;hwbreak+;qXfer:features:read+".to_string(),
             )
         } else if cmd == "qAttached" {
             CommandResult::Reply("1".to_string())

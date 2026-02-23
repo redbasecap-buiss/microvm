@@ -4,11 +4,13 @@ pub mod disasm;
 pub mod execute;
 pub mod fpu;
 pub mod mmu;
+pub mod trigger;
 pub mod vector;
 
 use crate::memory::Bus;
 use csr::CsrFile;
 use mmu::Mmu;
+use trigger::TriggerModule;
 use vector::VectorRegFile;
 
 /// RISC-V privilege modes
@@ -73,6 +75,8 @@ pub struct Cpu {
     pub hart_state: HartState,
     /// Vector register file (V extension)
     pub vregs: VectorRegFile,
+    /// Debug triggers (Sdtrig extension)
+    pub triggers: TriggerModule,
 }
 
 impl Default for Cpu {
@@ -98,6 +102,7 @@ impl Cpu {
             last_sbi: None,
             hart_state: HartState::Started,
             vregs: VectorRegFile::new(),
+            triggers: TriggerModule::new(),
         }
     }
 
@@ -119,6 +124,7 @@ impl Cpu {
         self.wfi = false;
         self.cycle = 0;
         self.vregs = VectorRegFile::new();
+        self.triggers = TriggerModule::new();
         // Restore mhartid after reset
         self.csrs.write_raw(csr::MHARTID, self.hart_id);
     }
@@ -151,6 +157,18 @@ impl Cpu {
                 return true;
             }
         };
+
+        // Sdtrig: check execute triggers before instruction fetch
+        if self.triggers.has_active_triggers() {
+            if let Some(trigger::TriggerAction::BreakpointException) =
+                self.triggers.check_execute(pc, self.mode)
+            {
+                // Breakpoint exception (cause 3), tval = faulting PC
+                self.handle_exception(3, pc, bus);
+                self.cycle += 1;
+                return true;
+            }
+        }
 
         // Fast instruction fetch (bypasses device routing for DRAM)
         let (raw_or_compressed, is_compressed) = bus.fetch_insn(phys_pc);

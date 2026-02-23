@@ -10964,3 +10964,181 @@ fn test_disasm_prefetch_instructions() {
         dis
     );
 }
+
+// ============================================================================
+// Sdtrig — Debug Trigger Extension Tests
+// ============================================================================
+
+/// Encode CSRRW rd, csr, rs1
+fn encode_csrrw(rd: u32, csr: u32, rs1: u32) -> u32 {
+    (csr << 20) | (rs1 << 15) | (1 << 12) | (rd << 7) | 0x73
+}
+
+/// Encode CSRRS rd, csr, rs1
+fn encode_csrrs(rd: u32, csr: u32, rs1: u32) -> u32 {
+    (csr << 20) | (rs1 << 15) | (2 << 12) | (rd << 7) | 0x73
+}
+
+#[test]
+fn test_sdtrig_tselect_read_write() {
+    // Write 0 to tselect (x5=0), read back into x1
+    let (cpu, _) = run_program_with_regs(
+        &[
+            encode_csrrw(0, 0x7A0, 5), // csrw tselect, x5 (=0)
+            encode_csrrs(1, 0x7A0, 0), // csrr x1, tselect
+        ],
+        2,
+        &[(5, 0)],
+    );
+    assert_eq!(cpu.regs[1], 0, "tselect should be 0");
+}
+
+#[test]
+fn test_sdtrig_tdata1_default_disabled() {
+    // Read tdata1 — default should have type=15 (disabled)
+    let (cpu, _) = run_program(
+        &[
+            encode_csrrs(1, 0x7A1, 0), // csrr x1, tdata1
+        ],
+        1,
+    );
+    assert_eq!(
+        cpu.regs[1] >> 60,
+        15,
+        "default tdata1 type should be 15 (disabled)"
+    );
+}
+
+#[test]
+fn test_sdtrig_tinfo() {
+    // tinfo should report mcontrol6 (bit 6) and disabled (bit 15) supported
+    let (cpu, _) = run_program(
+        &[
+            encode_csrrs(1, 0x7A4, 0), // csrr x1, tinfo
+        ],
+        1,
+    );
+    assert!(
+        cpu.regs[1] & (1 << 6) != 0,
+        "tinfo should support mcontrol6"
+    );
+    assert!(
+        cpu.regs[1] & (1 << 15) != 0,
+        "tinfo should support disabled type"
+    );
+}
+
+#[test]
+fn test_sdtrig_configure_execute_trigger() {
+    // Configure trigger 0 as mcontrol6 execute trigger at DRAM_BASE + 0x20
+    let target_addr = DRAM_BASE + 0x20;
+    // type=6, M|S|U|execute = 0x5C (M=0x40, S=0x10, U=0x08, execute=0x04)
+    let tdata1_val: u64 = (6u64 << 60) | (1 << 6) | (1 << 4) | (1 << 3) | (1 << 2);
+
+    let (cpu, _) = run_program_with_regs(
+        &[
+            encode_csrrw(0, 0x7A0, 5), // csrw tselect, x5 (=0)
+            encode_csrrw(0, 0x7A1, 6), // csrw tdata1, x6
+            encode_csrrw(0, 0x7A2, 7), // csrw tdata2, x7
+            encode_csrrs(1, 0x7A1, 0), // csrr x1, tdata1
+            encode_csrrs(2, 0x7A2, 0), // csrr x2, tdata2
+        ],
+        5,
+        &[(5, 0), (6, tdata1_val), (7, target_addr)],
+    );
+    assert_eq!(cpu.regs[1] >> 60, 6, "tdata1 type should be 6 (mcontrol6)");
+    assert_eq!(cpu.regs[2], target_addr, "tdata2 should be target address");
+}
+
+#[test]
+fn test_sdtrig_execute_trigger_fires() {
+    // Set up an execute trigger at DRAM_BASE + 0x10 (instruction 4)
+    // Instructions 0-3 configure the trigger, instruction 4 should trap
+    let target_addr = DRAM_BASE + 0x10;
+    let tdata1_val: u64 = (6u64 << 60) | (1 << 6) | (1 << 4) | (1 << 3) | (1 << 2); // mcontrol6, M|S|U, execute
+
+    // Set mtvec to DRAM_BASE + 0x100 so we can catch the breakpoint exception
+    let mtvec_addr = DRAM_BASE + 0x100;
+
+    let mut instructions = vec![
+        encode_csrrw(0, 0x7A0, 5), // 0x00: csrw tselect, x5 (=0)
+        encode_csrrw(0, 0x7A1, 6), // 0x04: csrw tdata1, x6
+        encode_csrrw(0, 0x7A2, 7), // 0x08: csrw tdata2, x7
+        encode_csrrw(0, 0x305, 8), // 0x0C: csrw mtvec, x8
+        0x00000013,                // 0x10: nop — TRIGGER FIRES HERE (before executing)
+    ];
+    // Pad to 0x100
+    while instructions.len() < 64 {
+        instructions.push(0x00000013); // nop
+    }
+    // At mtvec (DRAM_BASE + 0x100): read mcause into x10
+    instructions.push(encode_csrrs(10, 0x342, 0)); // csrr a0, mcause
+
+    let (cpu, _) = run_program_with_regs(
+        &instructions,
+        6, // 4 setup + 1 trigger fire + 1 in handler
+        &[(5, 0), (6, tdata1_val), (7, target_addr), (8, mtvec_addr)],
+    );
+    // mcause should be 3 (breakpoint)
+    assert_eq!(cpu.regs[10], 3, "mcause should be 3 (breakpoint exception)");
+}
+
+#[test]
+fn test_sdtrig_multiple_triggers() {
+    // Configure all 4 trigger slots and verify they work
+    let tdata1_val: u64 = (6u64 << 60) | (1 << 6) | (1 << 4) | (1 << 3) | (1 << 2);
+
+    let (cpu, _) = run_program_with_regs(
+        &[
+            // Trigger 0
+            encode_csrrw(0, 0x7A0, 10), // csrw tselect, x10 (=0)
+            encode_csrrw(0, 0x7A1, 6),  // csrw tdata1, x6
+            encode_csrrw(0, 0x7A2, 11), // csrw tdata2, x11 (=0x1000)
+            // Trigger 1
+            encode_csrrw(0, 0x7A0, 12), // csrw tselect, x12 (=1)
+            encode_csrrw(0, 0x7A1, 6),  // csrw tdata1, x6
+            encode_csrrw(0, 0x7A2, 13), // csrw tdata2, x13 (=0x2000)
+            // Trigger 2
+            encode_csrrw(0, 0x7A0, 14), // csrw tselect, x14 (=2)
+            encode_csrrw(0, 0x7A1, 6),  // csrw tdata1, x6
+            encode_csrrw(0, 0x7A2, 15), // csrw tdata2, x15 (=0x3000)
+            // Trigger 3
+            encode_csrrw(0, 0x7A0, 16), // csrw tselect, x16 (=3)
+            encode_csrrw(0, 0x7A1, 6),  // csrw tdata1, x6
+            encode_csrrw(0, 0x7A2, 17), // csrw tdata2, x17 (=0x4000)
+            // Read back trigger 2
+            encode_csrrw(0, 0x7A0, 14), // csrw tselect, x14 (=2)
+            encode_csrrs(1, 0x7A2, 0),  // csrr x1, tdata2
+        ],
+        14,
+        &[
+            (6, tdata1_val),
+            (10, 0),
+            (11, 0x1000),
+            (12, 1),
+            (13, 0x2000),
+            (14, 2),
+            (15, 0x3000),
+            (16, 3),
+            (17, 0x4000),
+        ],
+    );
+    assert_eq!(cpu.regs[1], 0x3000, "trigger 2 tdata2 should be 0x3000");
+}
+
+#[test]
+fn test_sdtrig_disassemble_trigger_csrs() {
+    use microvm::cpu::disasm::disassemble;
+    // csrr x1, tselect = csrrs x1, 0x7A0, x0
+    let csrr_tselect = encode_csrrs(1, 0x7A0, 0);
+    let dis = disassemble(csrr_tselect, 0);
+    assert!(dis.contains("tselect"), "should show tselect, got: {}", dis);
+
+    let csrr_tdata1 = encode_csrrs(1, 0x7A1, 0);
+    let dis = disassemble(csrr_tdata1, 0);
+    assert!(dis.contains("tdata1"), "should show tdata1, got: {}", dis);
+
+    let csrr_tinfo = encode_csrrs(1, 0x7A4, 0);
+    let dis = disassemble(csrr_tinfo, 0);
+    assert!(dis.contains("tinfo"), "should show tinfo, got: {}", dis);
+}

@@ -479,6 +479,15 @@ fn op_misc_mem(cpu: &mut Cpu, bus: &mut Bus, inst: &Instruction, len: u64) {
 
 fn op_load(cpu: &mut Cpu, bus: &mut Bus, inst: &Instruction, len: u64) {
     let addr = cpu.regs[inst.rs1].wrapping_add(inst.imm_i as u64);
+    // Sdtrig: check load watchpoints
+    if cpu.triggers.has_active_triggers() {
+        if let Some(super::trigger::TriggerAction::BreakpointException) =
+            cpu.triggers.check_load(addr, cpu.mode)
+        {
+            cpu.handle_exception(3, addr, bus);
+            return;
+        }
+    }
     let phys = match cpu
         .mmu
         .translate(addr, AccessType::Read, cpu.mode, &cpu.csrs, bus)
@@ -560,6 +569,15 @@ fn read_misaligned_u64(bus: &mut Bus, addr: u64) -> u64 {
 
 fn op_store(cpu: &mut Cpu, bus: &mut Bus, inst: &Instruction, len: u64) {
     let addr = cpu.regs[inst.rs1].wrapping_add(inst.imm_s as u64);
+    // Sdtrig: check store watchpoints
+    if cpu.triggers.has_active_triggers() {
+        if let Some(super::trigger::TriggerAction::BreakpointException) =
+            cpu.triggers.check_store(addr, cpu.mode)
+        {
+            cpu.handle_exception(3, addr, bus);
+            return;
+        }
+    }
     let phys = match cpu
         .mmu
         .translate(addr, AccessType::Write, cpu.mode, &cpu.csrs, bus)
@@ -1397,7 +1415,11 @@ fn op_system(cpu: &mut Cpu, bus: &mut Bus, inst: &Instruction, len: u64) -> bool
         return true;
     }
 
-    let old_val = cpu.csrs.read(csr_addr);
+    // Sdtrig: route trigger CSRs through trigger module
+    let old_val = match csr_addr {
+        0x7A0..=0x7A4 => cpu.triggers.read_csr(csr_addr),
+        _ => cpu.csrs.read(csr_addr),
+    };
 
     let write_val = match inst.funct3 {
         1 => cpu.regs[inst.rs1],            // CSRRW
@@ -1425,7 +1447,11 @@ fn op_system(cpu: &mut Cpu, bus: &mut Bus, inst: &Instruction, len: u64) -> bool
             cpu.handle_exception(2, inst.raw as u64, bus); // Illegal instruction
             return true;
         }
-        cpu.csrs.write(csr_addr, write_val);
+        // Sdtrig: route trigger CSR writes through trigger module
+        match csr_addr {
+            0x7A0..=0x7A4 => cpu.triggers.write_csr(csr_addr, write_val, cpu.mode),
+            _ => cpu.csrs.write(csr_addr, write_val),
+        }
         // Flush TLB when SATP changes (address space switch)
         if csr_addr == csr::SATP {
             cpu.mmu.flush_tlb();
