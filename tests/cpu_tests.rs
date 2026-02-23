@@ -11142,3 +11142,118 @@ fn test_sdtrig_disassemble_trigger_csrs() {
     let dis = disassemble(csrr_tinfo, 0);
     assert!(dis.contains("tinfo"), "should show tinfo, got: {}", dis);
 }
+
+// ============================================================
+// Smcntrpmf — Counter Privilege Mode Filtering
+// ============================================================
+
+#[test]
+fn test_smcntrpmf_mcyclecfg_default_zero() {
+    // mcyclecfg defaults to 0 (no filtering — count in all modes)
+    let (cpu, _bus) = run_program(&[], 0);
+    assert_eq!(cpu.csrs.read(microvm::cpu::csr::MCYCLECFG), 0);
+}
+
+#[test]
+fn test_smcntrpmf_minstretcfg_default_zero() {
+    let (cpu, _bus) = run_program(&[], 0);
+    assert_eq!(cpu.csrs.read(microvm::cpu::csr::MINSTRETCFG), 0);
+}
+
+#[test]
+fn test_smcntrpmf_mcyclecfg_write_read() {
+    let (mut cpu, _bus) = run_program(&[], 0);
+    use microvm::cpu::csr::*;
+    let val = CNTRPMF_MINH | CNTRPMF_SINH;
+    cpu.csrs.write(MCYCLECFG, val);
+    assert_eq!(cpu.csrs.read(MCYCLECFG), val);
+}
+
+#[test]
+fn test_smcntrpmf_minstretcfg_write_read() {
+    let (mut cpu, _bus) = run_program(&[], 0);
+    use microvm::cpu::csr::*;
+    let val = CNTRPMF_UINH;
+    cpu.csrs.write(MINSTRETCFG, val);
+    assert_eq!(cpu.csrs.read(MINSTRETCFG), val);
+}
+
+#[test]
+fn test_smcntrpmf_only_writable_bits_stick() {
+    // Only MINH/SINH/UINH (bits 62:60) should be writable
+    let (mut cpu, _bus) = run_program(&[], 0);
+    use microvm::cpu::csr::*;
+    cpu.csrs.write(MCYCLECFG, u64::MAX);
+    assert_eq!(cpu.csrs.read(MCYCLECFG), CNTRPMF_WRITABLE);
+}
+
+#[test]
+fn test_smcntrpmf_high_halves_read_zero() {
+    // RV64: mcyclecfgh/minstretcfgh should always be 0
+    let (cpu, _bus) = run_program(&[], 0);
+    assert_eq!(cpu.csrs.read(microvm::cpu::csr::MCYCLECFGH), 0);
+    assert_eq!(cpu.csrs.read(microvm::cpu::csr::MINSTRETCFGH), 0);
+}
+
+#[test]
+fn test_smcntrpmf_high_halves_ignore_write() {
+    let (mut cpu, _bus) = run_program(&[], 0);
+    use microvm::cpu::csr::*;
+    cpu.csrs.write(MCYCLECFGH, 0xDEAD);
+    cpu.csrs.write(MINSTRETCFGH, 0xBEEF);
+    assert_eq!(cpu.csrs.read(MCYCLECFGH), 0);
+    assert_eq!(cpu.csrs.read(MINSTRETCFGH), 0);
+}
+
+#[test]
+fn test_smcntrpmf_cycle_counting_default_enabled() {
+    let (cpu, _bus) = run_program(&[], 0);
+    use microvm::cpu::PrivilegeMode;
+    assert!(cpu.csrs.cycle_counting_enabled(PrivilegeMode::Machine));
+    assert!(cpu.csrs.cycle_counting_enabled(PrivilegeMode::Supervisor));
+    assert!(cpu.csrs.cycle_counting_enabled(PrivilegeMode::User));
+}
+
+#[test]
+fn test_smcntrpmf_inhibit_cycle_mmode() {
+    let (mut cpu, _bus) = run_program(&[], 0);
+    use microvm::cpu::csr::*;
+    use microvm::cpu::PrivilegeMode;
+    cpu.csrs.write(MCYCLECFG, CNTRPMF_MINH);
+    assert!(!cpu.csrs.cycle_counting_enabled(PrivilegeMode::Machine));
+    assert!(cpu.csrs.cycle_counting_enabled(PrivilegeMode::Supervisor));
+    assert!(cpu.csrs.cycle_counting_enabled(PrivilegeMode::User));
+}
+
+#[test]
+fn test_smcntrpmf_inhibit_instret_smode() {
+    let (mut cpu, _bus) = run_program(&[], 0);
+    use microvm::cpu::csr::*;
+    use microvm::cpu::PrivilegeMode;
+    cpu.csrs.write(MINSTRETCFG, CNTRPMF_SINH);
+    assert!(cpu.csrs.instret_counting_enabled(PrivilegeMode::Machine));
+    assert!(!cpu.csrs.instret_counting_enabled(PrivilegeMode::Supervisor));
+    assert!(cpu.csrs.instret_counting_enabled(PrivilegeMode::User));
+}
+
+#[test]
+fn test_smcntrpmf_inhibit_all_modes() {
+    let (mut cpu, _bus) = run_program(&[], 0);
+    use microvm::cpu::csr::*;
+    use microvm::cpu::PrivilegeMode;
+    let all = CNTRPMF_MINH | CNTRPMF_SINH | CNTRPMF_UINH;
+    cpu.csrs.write(MCYCLECFG, all);
+    assert!(!cpu.csrs.cycle_counting_enabled(PrivilegeMode::Machine));
+    assert!(!cpu.csrs.cycle_counting_enabled(PrivilegeMode::Supervisor));
+    assert!(!cpu.csrs.cycle_counting_enabled(PrivilegeMode::User));
+}
+
+#[test]
+fn test_smcntrpmf_in_isa_string() {
+    let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "", false, None);
+    let dtb_str = String::from_utf8_lossy(&dtb);
+    assert!(
+        dtb_str.contains("smcntrpmf"),
+        "DTB should advertise smcntrpmf extension"
+    );
+}

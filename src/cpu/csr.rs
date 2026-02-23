@@ -77,6 +77,24 @@ pub const SEED_OPTYPE_ES16: u64 = 2 << 30; // 16 bits of entropy available in [1
 // Machine environment config high (RV64: reads as 0)
 pub const MENVCFGH: u16 = 0x31A;
 
+// Smcntrpmf extension — Counter Privilege Mode Filtering
+// mcyclecfg/minstretcfg control whether cycle/instret count in specific priv modes
+pub const MCYCLECFG: u16 = 0x321;
+pub const MINSTRETCFG: u16 = 0x322;
+// RV64: high halves not needed (combined in single 64-bit reg), but Linux may probe them
+pub const MCYCLECFGH: u16 = 0x721;
+pub const MINSTRETCFGH: u16 = 0x722;
+// Bit positions in mcyclecfg/minstretcfg
+pub const CNTRPMF_MINH: u64 = 1u64 << 62; // Inhibit counting in M-mode
+pub const CNTRPMF_SINH: u64 = 1u64 << 61; // Inhibit counting in S-mode
+pub const CNTRPMF_UINH: u64 = 1u64 << 60; // Inhibit counting in U-mode
+#[allow(dead_code)]
+pub const CNTRPMF_VSINH: u64 = 1u64 << 59; // VS-mode (hypervisor, not implemented)
+#[allow(dead_code)]
+pub const CNTRPMF_VUINH: u64 = 1u64 << 58; // VU-mode (hypervisor, not implemented)
+                                           // Writable mask: MINH, SINH, UINH (we don't implement hypervisor modes)
+pub const CNTRPMF_WRITABLE: u64 = CNTRPMF_MINH | CNTRPMF_SINH | CNTRPMF_UINH;
+
 // Machine configuration pointer (Linux 6.x probes this)
 #[allow(dead_code)]
 pub const MCONFIGPTR: u16 = 0xF15;
@@ -258,10 +276,44 @@ impl CsrFile {
         csrs
     }
 
-    /// Set cycle/instret counters (called from CPU step)
-    pub fn update_counters(&mut self, cycle: u64) {
-        self.regs[MCYCLE as usize] = cycle;
-        self.regs[MINSTRET as usize] = cycle; // 1:1 for now
+    /// Set cycle/instret counters (called from CPU step).
+    /// With Smcntrpmf, counters only increment if the current privilege mode is not inhibited.
+    pub fn update_counters(&mut self, mode: PrivilegeMode) {
+        if self.cycle_counting_enabled(mode) {
+            self.regs[MCYCLE as usize] = self.regs[MCYCLE as usize].wrapping_add(1);
+        }
+        if self.instret_counting_enabled(mode) {
+            self.regs[MINSTRET as usize] = self.regs[MINSTRET as usize].wrapping_add(1);
+        }
+    }
+
+    /// Check if cycle counter should increment in the given privilege mode (Smcntrpmf).
+    /// Returns false if counting is inhibited for this mode.
+    pub fn cycle_counting_enabled(&self, mode: PrivilegeMode) -> bool {
+        let cfg = self.regs[MCYCLECFG as usize];
+        // If mcyclecfg is 0, counting is always enabled (default behavior)
+        if cfg == 0 {
+            return true;
+        }
+        !Self::mode_inhibited(cfg, mode)
+    }
+
+    /// Check if instret counter should increment in the given privilege mode (Smcntrpmf).
+    pub fn instret_counting_enabled(&self, mode: PrivilegeMode) -> bool {
+        let cfg = self.regs[MINSTRETCFG as usize];
+        if cfg == 0 {
+            return true;
+        }
+        !Self::mode_inhibited(cfg, mode)
+    }
+
+    /// Check if the given privilege mode is inhibited by a counter config register.
+    fn mode_inhibited(cfg: u64, mode: PrivilegeMode) -> bool {
+        match mode {
+            PrivilegeMode::Machine => cfg & CNTRPMF_MINH != 0,
+            PrivilegeMode::Supervisor => cfg & CNTRPMF_SINH != 0,
+            PrivilegeMode::User => cfg & CNTRPMF_UINH != 0,
+        }
     }
 
     /// Increment HPM counters matching the given event.
@@ -373,6 +425,10 @@ impl CsrFile {
             MENVCFG => self.regs[MENVCFG as usize],
             MENVCFGH => 0, // RV64: high half is 0
             MCOUNTINHIBIT => self.regs[MCOUNTINHIBIT as usize],
+            // Smcntrpmf: counter privilege mode filtering
+            MCYCLECFG => self.regs[MCYCLECFG as usize],
+            MINSTRETCFG => self.regs[MINSTRETCFG as usize],
+            MCYCLECFGH | MINSTRETCFGH => 0, // RV64: high halves always 0
             // Machine HPM counters (mhpmcounter3-31)
             0xB03..=0xB1F => self.hpm_counters[(addr - 0xB03) as usize],
             // Machine HPM event selectors (mhpmevent3-31)
@@ -580,6 +636,10 @@ impl CsrFile {
             FCSR => {
                 self.regs[FCSR as usize] = val & 0xFF;
             }
+            // Smcntrpmf: counter privilege mode filtering
+            MCYCLECFG => self.regs[MCYCLECFG as usize] = val & CNTRPMF_WRITABLE,
+            MINSTRETCFG => self.regs[MINSTRETCFG as usize] = val & CNTRPMF_WRITABLE,
+            MCYCLECFGH | MINSTRETCFGH => {} // RV64: writes ignored
             // HPM counters — writable (set counter value)
             0xB03..=0xB1F => {
                 self.hpm_counters[(addr - 0xB03) as usize] = val;

@@ -185,7 +185,7 @@ impl Cpu {
         // x0 is always zero
         self.regs[0] = 0;
         self.cycle += 1;
-        self.csrs.update_counters(self.cycle);
+        self.csrs.update_counters(self.mode);
         cont
     }
 
