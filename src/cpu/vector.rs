@@ -1608,10 +1608,29 @@ fn execute_vv_int(cpu: &mut Cpu, ctx: &VCtx) {
         let is_cmp = matches!(funct6, 0b011000..=0b011101);
         let result = match funct6 {
             0b000000 => trunc_sew(a.wrapping_add(b), sew),
+            0b000001 => a & !trunc_sew(b, sew), // Zvbb: vandn.vv
             0b000010 => trunc_sew(a.wrapping_sub(b), sew),
             0b001001 => a & b,
             0b001010 => a | b,
             0b001011 => a ^ b,
+            // Zvbb: vror.vv — rotate right
+            0b010100 => {
+                let shift = b & (sew as u64 - 1);
+                let val = trunc_sew(a, sew);
+                trunc_sew(
+                    (val >> shift) | (val << ((sew as u64 - shift) & (sew as u64 - 1))),
+                    sew,
+                )
+            }
+            // Zvbb: vrol.vv — rotate left
+            0b010101 => {
+                let shift = b & (sew as u64 - 1);
+                let val = trunc_sew(a, sew);
+                trunc_sew(
+                    (val << shift) | (val >> ((sew as u64 - shift) & (sew as u64 - 1))),
+                    sew,
+                )
+            }
             0b010111 => {
                 if vm == 1 || cpu.vregs.mask_bit(i) {
                     trunc_sew(b, sew)
@@ -1718,6 +1737,15 @@ fn execute_vv_int(cpu: &mut Cpu, ctx: &VCtx) {
                 let shift = cpu.vregs.read_elem(vs1, sew, i) & ((sew * 2 - 1) as u64);
                 trunc_sew((sext_sew(wide, sew * 2) >> shift) as u64, sew)
             }
+            // Zvbb: vwsll.vv — widening shift left logical (SEW → 2*SEW)
+            0b110101 => {
+                let dsew = sew * 2;
+                let val = trunc_sew(a, sew);
+                let shift = b & (dsew as u64 - 1);
+                cpu.vregs
+                    .write_elem(vd, dsew, i, trunc_sew(val << shift, dsew));
+                continue;
+            }
             _ => continue,
         };
 
@@ -1755,10 +1783,29 @@ fn execute_vxi_int(cpu: &mut Cpu, ctx: &VCtx, scalar: u64) {
         let is_cmp = matches!(funct6, 0b011000..=0b011111);
         let result = match funct6 {
             0b000000 => trunc_sew(a.wrapping_add(b), sew),
+            0b000001 => a & !trunc_sew(b, sew), // Zvbb: vandn.vx
             0b000011 => trunc_sew(b.wrapping_sub(a), sew),
             0b001001 => a & b,
             0b001010 => a | b,
             0b001011 => a ^ b,
+            // Zvbb: vror.vx / vror.vi — rotate right
+            0b010100 => {
+                let shift = b & (sew as u64 - 1);
+                let val = trunc_sew(a, sew);
+                trunc_sew(
+                    (val >> shift) | (val << ((sew as u64 - shift) & (sew as u64 - 1))),
+                    sew,
+                )
+            }
+            // Zvbb: vrol.vx — rotate left
+            0b010101 => {
+                let shift = b & (sew as u64 - 1);
+                let val = trunc_sew(a, sew);
+                trunc_sew(
+                    (val << shift) | (val >> ((sew as u64 - shift) & (sew as u64 - 1))),
+                    sew,
+                )
+            }
             0b010111 => {
                 if vm == 1 || cpu.vregs.mask_bit(i) {
                     trunc_sew(b, sew)
@@ -1871,6 +1918,15 @@ fn execute_vxi_int(cpu: &mut Cpu, ctx: &VCtx, scalar: u64) {
                 let wide = cpu.vregs.read_elem(vs2, sew * 2, i);
                 let shift = b & ((sew * 2 - 1) as u64);
                 trunc_sew((sext_sew(wide, sew * 2) >> shift) as u64, sew)
+            }
+            // Zvbb: vwsll.vx / vwsll.vi — widening shift left logical
+            0b110101 => {
+                let dsew = sew * 2;
+                let val = trunc_sew(a, sew);
+                let shift = b & (dsew as u64 - 1);
+                cpu.vregs
+                    .write_elem(vd, dsew, i, trunc_sew(val << shift, dsew));
+                continue;
             }
             _ => continue,
         };
@@ -2323,33 +2379,141 @@ fn execute_mvv(cpu: &mut Cpu, ctx: &VCtx) {
             }
         }
 
-        // --- vzext / vsext (funct6=0b010010, vs1 encodes variant) ---
+        // --- vzext / vsext / Zvbb unary ops (funct6=0b010010, vs1 encodes variant) ---
         0b010010 => {
-            // vs1 field selects the extension:
-            // 00010 = vzext.vf8, 00011 = vsext.vf8
-            // 00100 = vzext.vf4, 00101 = vsext.vf4
-            // 00110 = vzext.vf2, 00111 = vsext.vf2
-            let src_sew = match vs1 {
-                0b00010 | 0b00011 => sew / 8,
-                0b00100 | 0b00101 => sew / 4,
-                0b00110 | 0b00111 => sew / 2,
-                _ => return,
-            };
-            if src_sew < 8 {
-                return;
-            }
-            let signed = vs1 & 1 != 0;
-            for i in 0..vl as usize {
-                if !elem_active(cpu, vm, i) {
-                    continue;
+            match vs1 {
+                // Zvbb unary operations
+                0b01000 => {
+                    // vbrev8.v: byte-reverse within each byte (= reverse bits in each byte)
+                    for i in 0..vl as usize {
+                        if !elem_active(cpu, vm, i) {
+                            continue;
+                        }
+                        let val = cpu.vregs.read_elem(vs2, sew, i);
+                        let mut result = 0u64;
+                        for byte_idx in 0..(sew / 8) as usize {
+                            let b = ((val >> (byte_idx * 8)) & 0xFF) as u8;
+                            let reversed = b.reverse_bits();
+                            result |= (reversed as u64) << (byte_idx * 8);
+                        }
+                        cpu.vregs.write_elem(vd, sew, i, trunc_sew(result, sew));
+                    }
                 }
-                let val = cpu.vregs.read_elem(vs2, src_sew, i);
-                let result = if signed {
-                    trunc_sew(sext_sew(val, src_sew) as u64, sew)
-                } else {
-                    trunc_sew(val, sew)
-                };
-                cpu.vregs.write_elem(vd, sew, i, result);
+                0b01001 => {
+                    // vrev8.v: reverse byte order within each element
+                    for i in 0..vl as usize {
+                        if !elem_active(cpu, vm, i) {
+                            continue;
+                        }
+                        let val = cpu.vregs.read_elem(vs2, sew, i);
+                        let nbytes = (sew / 8) as usize;
+                        let mut result = 0u64;
+                        for byte_idx in 0..nbytes {
+                            let b = (val >> (byte_idx * 8)) & 0xFF;
+                            result |= b << ((nbytes - 1 - byte_idx) * 8);
+                        }
+                        cpu.vregs.write_elem(vd, sew, i, trunc_sew(result, sew));
+                    }
+                }
+                0b01010 => {
+                    // vbrev.v: reverse all bits within each element
+                    for i in 0..vl as usize {
+                        if !elem_active(cpu, vm, i) {
+                            continue;
+                        }
+                        let val = cpu.vregs.read_elem(vs2, sew, i);
+                        let result = match sew {
+                            8 => (val as u8).reverse_bits() as u64,
+                            16 => (val as u16).reverse_bits() as u64,
+                            32 => (val as u32).reverse_bits() as u64,
+                            64 => val.reverse_bits(),
+                            _ => val,
+                        };
+                        cpu.vregs.write_elem(vd, sew, i, result);
+                    }
+                }
+                0b01100 => {
+                    // vclz.v: count leading zeros within each element
+                    for i in 0..vl as usize {
+                        if !elem_active(cpu, vm, i) {
+                            continue;
+                        }
+                        let val = cpu.vregs.read_elem(vs2, sew, i);
+                        let result = match sew {
+                            8 => (val as u8).leading_zeros() as u64,
+                            16 => (val as u16).leading_zeros() as u64,
+                            32 => (val as u32).leading_zeros() as u64,
+                            64 => val.leading_zeros() as u64,
+                            _ => 0,
+                        };
+                        cpu.vregs.write_elem(vd, sew, i, result);
+                    }
+                }
+                0b01101 => {
+                    // vctz.v: count trailing zeros within each element
+                    for i in 0..vl as usize {
+                        if !elem_active(cpu, vm, i) {
+                            continue;
+                        }
+                        let val = cpu.vregs.read_elem(vs2, sew, i);
+                        let result = match sew {
+                            8 => {
+                                if val & 0xFF == 0 {
+                                    8
+                                } else {
+                                    (val as u8).trailing_zeros() as u64
+                                }
+                            }
+                            16 => {
+                                if val & 0xFFFF == 0 {
+                                    16
+                                } else {
+                                    (val as u16).trailing_zeros() as u64
+                                }
+                            }
+                            32 => (val as u32).trailing_zeros() as u64,
+                            64 => val.trailing_zeros() as u64,
+                            _ => 0,
+                        };
+                        cpu.vregs.write_elem(vd, sew, i, result);
+                    }
+                }
+                0b01110 => {
+                    // vcpop.v: population count (count ones) within each element
+                    for i in 0..vl as usize {
+                        if !elem_active(cpu, vm, i) {
+                            continue;
+                        }
+                        let val = cpu.vregs.read_elem(vs2, sew, i);
+                        let result = trunc_sew(val, sew).count_ones() as u64;
+                        cpu.vregs.write_elem(vd, sew, i, result);
+                    }
+                }
+                // vzext / vsext
+                0b00010..=0b00111 => {
+                    let src_sew = match vs1 {
+                        0b00010 | 0b00011 => sew / 8,
+                        0b00100 | 0b00101 => sew / 4,
+                        _ => sew / 2,
+                    };
+                    if src_sew < 8 {
+                        return;
+                    }
+                    let signed = vs1 & 1 != 0;
+                    for i in 0..vl as usize {
+                        if !elem_active(cpu, vm, i) {
+                            continue;
+                        }
+                        let val = cpu.vregs.read_elem(vs2, src_sew, i);
+                        let result = if signed {
+                            trunc_sew(sext_sew(val, src_sew) as u64, sew)
+                        } else {
+                            trunc_sew(val, sew)
+                        };
+                        cpu.vregs.write_elem(vd, sew, i, result);
+                    }
+                }
+                _ => (),
             }
         }
 

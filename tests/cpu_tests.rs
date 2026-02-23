@@ -11257,3 +11257,221 @@ fn test_smcntrpmf_in_isa_string() {
         "DTB should advertise smcntrpmf extension"
     );
 }
+
+// ============================================================================
+// Zvbb — Vector Bit-manipulation for Cryptography
+// ============================================================================
+
+#[test]
+fn test_zvbb_vandn_vv() {
+    // vandn.vv: vd[i] = vs2[i] & ~vs1[i]
+    // vsetivli x0, 2, e32,m1 (SEW=32, VL=2)
+    // vandn.vv v2, v0, v1   (funct6=0b000001)
+    let prog = &[
+        vsetivli(0, 2, 0b010_000),   // e32,m1
+        opivv(0b000001, 2, 1, 0, 1), // vandn.vv v2, v0, v1
+    ];
+    let (mut cpu, mut bus) = run_program(prog, 0);
+    cpu.vregs.write_elem(0, 32, 0, 0xFF00FF00);
+    cpu.vregs.write_elem(0, 32, 1, 0xABCD1234);
+    cpu.vregs.write_elem(1, 32, 0, 0x0F0F0F0F);
+    cpu.vregs.write_elem(1, 32, 1, 0xF0F0F0F0);
+    cpu.step(&mut bus); // vsetivli
+    cpu.step(&mut bus); // vandn
+                        // vs2 & ~vs1: 0xFF00FF00 & ~0x0F0F0F0F = 0xFF00FF00 & 0xF0F0F0F0 = 0xF000F000
+    assert_eq!(cpu.vregs.read_elem(2, 32, 0), 0xF000F000);
+    // 0xABCD1234 & ~0xF0F0F0F0 = 0xABCD1234 & 0x0F0F0F0F = 0x0B0D0204
+    assert_eq!(cpu.vregs.read_elem(2, 32, 1), 0x0B0D0204);
+}
+
+#[test]
+fn test_zvbb_vandn_vx() {
+    // vandn.vx: vd[i] = vs2[i] & ~x[rs1]
+    let prog = &[
+        vsetivli(0, 2, 0b010_000),   // e32,m1
+        opivx(0b000001, 2, 5, 0, 1), // vandn.vx v2, v0, x5
+    ];
+    let (mut cpu, mut bus) = run_program(prog, 0);
+    cpu.vregs.write_elem(0, 32, 0, 0xFF00FF00);
+    cpu.vregs.write_elem(0, 32, 1, 0x12345678);
+    cpu.regs[5] = 0x0F0F0F0F;
+    cpu.step(&mut bus);
+    cpu.step(&mut bus);
+    assert_eq!(cpu.vregs.read_elem(2, 32, 0), 0xF000F000);
+    assert_eq!(cpu.vregs.read_elem(2, 32, 1), 0x10305070);
+}
+
+#[test]
+fn test_zvbb_vrol_vv() {
+    // vrol.vv: rotate left, funct6=0b010101
+    let prog = &[
+        vsetivli(0, 1, 0b010_000),   // e32,m1
+        opivv(0b010101, 2, 1, 0, 1), // vrol.vv v2, v0, v1
+    ];
+    let (mut cpu, mut bus) = run_program(prog, 0);
+    cpu.vregs.write_elem(0, 32, 0, 0x80000001); // vs2
+    cpu.vregs.write_elem(1, 32, 0, 4); // vs1 (shift)
+    cpu.step(&mut bus);
+    cpu.step(&mut bus);
+    // rotate left 0x80000001 by 4: 0x00000018
+    assert_eq!(cpu.vregs.read_elem(2, 32, 0), 0x00000018);
+}
+
+#[test]
+fn test_zvbb_vror_vv() {
+    // vror.vv: rotate right, funct6=0b010100
+    let prog = &[
+        vsetivli(0, 1, 0b010_000),   // e32,m1
+        opivv(0b010100, 2, 1, 0, 1), // vror.vv v2, v0, v1
+    ];
+    let (mut cpu, mut bus) = run_program(prog, 0);
+    cpu.vregs.write_elem(0, 32, 0, 0x80000001); // vs2
+    cpu.vregs.write_elem(1, 32, 0, 4); // vs1 (shift)
+    cpu.step(&mut bus);
+    cpu.step(&mut bus);
+    // rotate right 0x80000001 by 4: 0x18000000
+    assert_eq!(cpu.vregs.read_elem(2, 32, 0), 0x18000000);
+}
+
+#[test]
+fn test_zvbb_vror_vi() {
+    // vror.vi: rotate right by immediate, uses OPIVI encoding (funct3=3)
+    let prog = &[
+        vsetivli(0, 1, 0b010_000),   // e32,m1
+        opivi(0b010100, 2, 4, 0, 1), // vror.vi v2, v0, 4
+    ];
+    let (mut cpu, mut bus) = run_program(prog, 0);
+    cpu.vregs.write_elem(0, 32, 0, 0x80000001);
+    cpu.step(&mut bus);
+    cpu.step(&mut bus);
+    assert_eq!(cpu.vregs.read_elem(2, 32, 0), 0x18000000);
+}
+
+#[test]
+fn test_zvbb_vbrev_v() {
+    // vbrev.v: reverse all bits, funct6=0b010010, vs1=0b01010, OPMVV
+    let prog = &[
+        vsetivli(0, 1, 0b010_000),         // e32,m1
+        opmvv(0b010010, 2, 0b01010, 0, 1), // vbrev.v v2, v0
+    ];
+    let (mut cpu, mut bus) = run_program(prog, 0);
+    cpu.vregs.write_elem(0, 32, 0, 0x80000000);
+    cpu.step(&mut bus);
+    cpu.step(&mut bus);
+    assert_eq!(cpu.vregs.read_elem(2, 32, 0), 0x00000001);
+}
+
+#[test]
+fn test_zvbb_vbrev8_v() {
+    // vbrev8.v: reverse bits within each byte, funct6=0b010010, vs1=0b01000
+    let prog = &[
+        vsetivli(0, 1, 0b010_000),         // e32,m1
+        opmvv(0b010010, 2, 0b01000, 0, 1), // vbrev8.v v2, v0
+    ];
+    let (mut cpu, mut bus) = run_program(prog, 0);
+    // byte 0x80 reversed = 0x01, byte 0x01 reversed = 0x80
+    cpu.vregs.write_elem(0, 32, 0, 0x80010000);
+    cpu.step(&mut bus);
+    cpu.step(&mut bus);
+    assert_eq!(cpu.vregs.read_elem(2, 32, 0), 0x01800000);
+}
+
+#[test]
+fn test_zvbb_vrev8_v() {
+    // vrev8.v: reverse byte order, funct6=0b010010, vs1=0b01001
+    let prog = &[
+        vsetivli(0, 1, 0b010_000),         // e32,m1
+        opmvv(0b010010, 2, 0b01001, 0, 1), // vrev8.v v2, v0
+    ];
+    let (mut cpu, mut bus) = run_program(prog, 0);
+    cpu.vregs.write_elem(0, 32, 0, 0x01020304);
+    cpu.step(&mut bus);
+    cpu.step(&mut bus);
+    assert_eq!(cpu.vregs.read_elem(2, 32, 0), 0x04030201);
+}
+
+#[test]
+fn test_zvbb_vclz_v() {
+    // vclz.v: count leading zeros, funct6=0b010010, vs1=0b01100
+    let prog = &[
+        vsetivli(0, 2, 0b010_000),         // e32,m1
+        opmvv(0b010010, 2, 0b01100, 0, 1), // vclz.v v2, v0
+    ];
+    let (mut cpu, mut bus) = run_program(prog, 0);
+    cpu.vregs.write_elem(0, 32, 0, 0x00100000); // clz=11
+    cpu.vregs.write_elem(0, 32, 1, 0); // clz=32
+    cpu.step(&mut bus);
+    cpu.step(&mut bus);
+    assert_eq!(cpu.vregs.read_elem(2, 32, 0), 11);
+    assert_eq!(cpu.vregs.read_elem(2, 32, 1), 32);
+}
+
+#[test]
+fn test_zvbb_vctz_v() {
+    // vctz.v: count trailing zeros, funct6=0b010010, vs1=0b01101
+    let prog = &[
+        vsetivli(0, 2, 0b010_000),         // e32,m1
+        opmvv(0b010010, 2, 0b01101, 0, 1), // vctz.v v2, v0
+    ];
+    let (mut cpu, mut bus) = run_program(prog, 0);
+    cpu.vregs.write_elem(0, 32, 0, 0x00100000); // ctz=20
+    cpu.vregs.write_elem(0, 32, 1, 0); // ctz=32
+    cpu.step(&mut bus);
+    cpu.step(&mut bus);
+    assert_eq!(cpu.vregs.read_elem(2, 32, 0), 20);
+    assert_eq!(cpu.vregs.read_elem(2, 32, 1), 32);
+}
+
+#[test]
+fn test_zvbb_vcpop_v() {
+    // vcpop.v (element popcount): funct6=0b010010, vs1=0b01110
+    let prog = &[
+        vsetivli(0, 1, 0b010_000),         // e32,m1
+        opmvv(0b010010, 2, 0b01110, 0, 1), // vcpop.v v2, v0
+    ];
+    let (mut cpu, mut bus) = run_program(prog, 0);
+    cpu.vregs.write_elem(0, 32, 0, 0xFF00FF00); // 16 ones
+    cpu.step(&mut bus);
+    cpu.step(&mut bus);
+    assert_eq!(cpu.vregs.read_elem(2, 32, 0), 16);
+}
+
+#[test]
+fn test_zvbb_vwsll_vv() {
+    // vwsll.vv: widening shift left, funct6=0b110101, OPIVV
+    // SEW=16, result is 32-bit
+    let prog = &[
+        vsetivli(0, 1, 0b001_000),   // e16,m1
+        opivv(0b110101, 2, 1, 0, 1), // vwsll.vv v2, v0, v1
+    ];
+    let (mut cpu, mut bus) = run_program(prog, 0);
+    cpu.vregs.write_elem(0, 16, 0, 0xABCD); // vs2
+    cpu.vregs.write_elem(1, 16, 0, 8); // vs1 (shift)
+    cpu.step(&mut bus);
+    cpu.step(&mut bus);
+    assert_eq!(cpu.vregs.read_elem(2, 32, 0), 0x00ABCD00);
+}
+
+#[test]
+fn test_zvbb_vwsll_vi() {
+    // vwsll.vi: widening shift left by immediate, OPIVI encoding
+    let prog = &[
+        vsetivli(0, 1, 0b001_000),   // e16,m1
+        opivi(0b110101, 2, 8, 0, 1), // vwsll.vi v2, v0, 8
+    ];
+    let (mut cpu, mut bus) = run_program(prog, 0);
+    cpu.vregs.write_elem(0, 16, 0, 0xABCD);
+    cpu.step(&mut bus);
+    cpu.step(&mut bus);
+    assert_eq!(cpu.vregs.read_elem(2, 32, 0), 0x00ABCD00);
+}
+
+#[test]
+fn test_zvbb_in_isa_string() {
+    let dtb = microvm::dtb::generate_dtb(128 * 1024 * 1024, "", false, None);
+    let dtb_str = String::from_utf8_lossy(&dtb);
+    assert!(
+        dtb_str.contains("zvbb"),
+        "DTB should advertise zvbb extension"
+    );
+}
