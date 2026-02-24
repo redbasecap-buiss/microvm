@@ -692,6 +692,22 @@ pub fn generate_dtb_smp(
     b.prop_u32("interrupt-parent", plic_phandle);
     b.end_node();
 
+    // VirtIO vsock
+    b.begin_node(&format!("virtio_mmio@{:x}", memory::VIRTIO8_BASE));
+    b.prop_str("compatible", "virtio,mmio");
+    b.prop_u32_array(
+        "reg",
+        &[
+            (memory::VIRTIO8_BASE >> 32) as u32,
+            memory::VIRTIO8_BASE as u32,
+            0,
+            memory::VIRTIO8_SIZE as u32,
+        ],
+    );
+    b.prop_u32_array("interrupts", &[18]);
+    b.prop_u32("interrupt-parent", plic_phandle);
+    b.end_node();
+
     // Syscon (poweroff/reboot)
     b.begin_node(&format!("syscon@{:x}", memory::SYSCON_BASE));
     b.prop_str("compatible", "syscon");
