@@ -99,6 +99,156 @@ pub const CNTRPMF_WRITABLE: u64 = CNTRPMF_MINH | CNTRPMF_SINH | CNTRPMF_UINH;
 #[allow(dead_code)]
 pub const MCONFIGPTR: u16 = 0xF15;
 
+// AIA (Smaia/Ssaia) — Advanced Interrupt Architecture CSRs
+pub const MISELECT: u16 = 0x350;
+pub const MIREG: u16 = 0x351;
+pub const MTOPEI: u16 = 0x35C;
+pub const MTOPI: u16 = 0xFB0;
+pub const SISELECT: u16 = 0x150;
+pub const SIREG: u16 = 0x151;
+pub const STOPEI: u16 = 0x15C;
+pub const STOPI: u16 = 0xDB0;
+
+// IMSIC indirect register addresses (used via miselect/siselect)
+pub const IMSIC_EIDELIVERY: u64 = 0x70;
+pub const IMSIC_EITHRESHOLD: u64 = 0x72;
+pub const IMSIC_EIP0: u64 = 0x80; // eip0-eip63 (even addresses only)
+pub const IMSIC_EIE0: u64 = 0xC0; // eie0-eie63 (even addresses only)
+
+/// Number of external interrupt identities per IMSIC interrupt file
+pub const IMSIC_NUM_IDS: usize = 64;
+/// Number of u64 words for EIP/EIE bitmaps (64 IDs = 1 word)
+pub const IMSIC_BITMAP_WORDS: usize = IMSIC_NUM_IDS.div_ceil(64);
+
+/// Per-privilege-level IMSIC interrupt file state
+#[derive(Clone, Default)]
+pub struct ImsicFile {
+    /// Interrupt delivery enable (0=disabled, 1=enabled, 0x40000000=use threshold)
+    pub eidelivery: u64,
+    /// Interrupt priority threshold (0=all enabled, N=only prio>N)
+    pub eithreshold: u64,
+    /// External interrupt pending bits (bitmap, one bit per ID)
+    pub eip: [u64; IMSIC_BITMAP_WORDS],
+    /// External interrupt enable bits (bitmap, one bit per ID)
+    pub eie: [u64; IMSIC_BITMAP_WORDS],
+}
+
+impl ImsicFile {
+    pub fn new() -> Self {
+        Self {
+            eidelivery: 0,
+            eithreshold: 0,
+            eip: [0; IMSIC_BITMAP_WORDS],
+            eie: [0; IMSIC_BITMAP_WORDS],
+        }
+    }
+
+    /// Read an indirect register selected by *iselect
+    pub fn read_indirect(&self, sel: u64) -> u64 {
+        match sel {
+            IMSIC_EIDELIVERY => self.eidelivery,
+            IMSIC_EITHRESHOLD => self.eithreshold,
+            s if s >= IMSIC_EIP0 && s < IMSIC_EIP0 + (IMSIC_BITMAP_WORDS as u64) * 2 => {
+                let idx = ((s - IMSIC_EIP0) / 2) as usize;
+                if s & 1 == 0 && idx < IMSIC_BITMAP_WORDS {
+                    self.eip[idx]
+                } else {
+                    0
+                }
+            }
+            s if s >= IMSIC_EIE0 && s < IMSIC_EIE0 + (IMSIC_BITMAP_WORDS as u64) * 2 => {
+                let idx = ((s - IMSIC_EIE0) / 2) as usize;
+                if s & 1 == 0 && idx < IMSIC_BITMAP_WORDS {
+                    self.eie[idx]
+                } else {
+                    0
+                }
+            }
+            _ => 0,
+        }
+    }
+
+    /// Write an indirect register selected by *iselect
+    pub fn write_indirect(&mut self, sel: u64, val: u64) {
+        match sel {
+            IMSIC_EIDELIVERY => self.eidelivery = val & 0x1, // only bit 0
+            IMSIC_EITHRESHOLD => self.eithreshold = val,
+            s if s >= IMSIC_EIP0 && s < IMSIC_EIP0 + (IMSIC_BITMAP_WORDS as u64) * 2 => {
+                let idx = ((s - IMSIC_EIP0) / 2) as usize;
+                if s & 1 == 0 && idx < IMSIC_BITMAP_WORDS {
+                    // Bit 0 is always reserved (no interrupt identity 0)
+                    self.eip[idx] = val & if idx == 0 { !1u64 } else { u64::MAX };
+                }
+            }
+            s if s >= IMSIC_EIE0 && s < IMSIC_EIE0 + (IMSIC_BITMAP_WORDS as u64) * 2 => {
+                let idx = ((s - IMSIC_EIE0) / 2) as usize;
+                if s & 1 == 0 && idx < IMSIC_BITMAP_WORDS {
+                    self.eie[idx] = val & if idx == 0 { !1u64 } else { u64::MAX };
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Set an interrupt pending by identity number (1-based, 0 is reserved)
+    #[allow(dead_code)]
+    pub fn set_pending(&mut self, id: u32) {
+        if id == 0 || id as usize >= IMSIC_NUM_IDS {
+            return;
+        }
+        let word = id as usize / 64;
+        let bit = id as usize % 64;
+        if word < IMSIC_BITMAP_WORDS {
+            self.eip[word] |= 1u64 << bit;
+        }
+    }
+
+    /// Get the top (highest-priority = lowest-numbered) pending-and-enabled interrupt.
+    /// Returns the interrupt identity (1-based) or 0 if none.
+    pub fn top_pending(&self) -> u32 {
+        if self.eidelivery == 0 {
+            return 0;
+        }
+        for w in 0..IMSIC_BITMAP_WORDS {
+            let active = self.eip[w] & self.eie[w];
+            if active != 0 {
+                let bit = active.trailing_zeros();
+                let id = (w * 64 + bit as usize) as u32;
+                if id == 0 {
+                    // bit 0 is reserved, check next
+                    let rest = active & !1;
+                    if rest != 0 {
+                        let bit2 = rest.trailing_zeros();
+                        let id2 = (w * 64 + bit2 as usize) as u32;
+                        if self.eithreshold == 0 || (id2 as u64) < self.eithreshold {
+                            return id2;
+                        }
+                    }
+                    continue;
+                }
+                if self.eithreshold == 0 || (id as u64) < self.eithreshold {
+                    return id;
+                }
+            }
+        }
+        0
+    }
+
+    /// Claim the top pending interrupt (read + clear pending bit).
+    /// Returns the interrupt identity or 0 if none.
+    pub fn claim_top(&mut self) -> u32 {
+        let id = self.top_pending();
+        if id != 0 {
+            let word = id as usize / 64;
+            let bit = id as usize % 64;
+            if word < IMSIC_BITMAP_WORDS {
+                self.eip[word] &= !(1u64 << bit);
+            }
+        }
+        id
+    }
+}
+
 // Sstc extension — supervisor timer compare
 pub const STIMECMP: u16 = 0x14D;
 
@@ -205,6 +355,10 @@ pub struct CsrFile {
     pub mtime: u64,
     /// Hardware performance counters 3-31 (29 counters)
     pub hpm_counters: [u64; 29],
+    /// AIA: M-mode IMSIC interrupt file
+    pub imsic_m: ImsicFile,
+    /// AIA: S-mode IMSIC interrupt file
+    pub imsic_s: ImsicFile,
 }
 
 impl CsrFile {
@@ -237,6 +391,8 @@ impl CsrFile {
             pmpaddr: [0; 16],
             mtime: 0,
             hpm_counters: [0; 29],
+            imsic_m: ImsicFile::new(),
+            imsic_s: ImsicFile::new(),
         };
         // MISA: RV64IMAFDCVSU (G = IMAFD + Zicsr + Zifencei, V = Vector)
         let misa = (2u64 << 62)  // MXL = 64-bit
@@ -448,6 +604,51 @@ impl CsrFile {
                     let _ = f.read_exact(&mut buf);
                 }
                 SEED_OPTYPE_ES16 | u64::from(u16::from_le_bytes(buf))
+            }
+            // AIA CSRs
+            MISELECT => self.regs[MISELECT as usize],
+            MIREG => {
+                let sel = self.regs[MISELECT as usize];
+                self.imsic_m.read_indirect(sel)
+            }
+            MTOPEI => {
+                // Read: returns top pending-and-enabled interrupt identity (no side effect)
+                let id = self.imsic_m.top_pending();
+                if id != 0 {
+                    (id as u64) << 16 | id as u64
+                } else {
+                    0
+                }
+            }
+            MTOPI => {
+                // Top interrupt identity + priority for M-mode
+                let id = self.imsic_m.top_pending();
+                if id != 0 {
+                    (id as u64) << 16 | 1
+                } else {
+                    0
+                }
+            }
+            SISELECT => self.regs[SISELECT as usize],
+            SIREG => {
+                let sel = self.regs[SISELECT as usize];
+                self.imsic_s.read_indirect(sel)
+            }
+            STOPEI => {
+                let id = self.imsic_s.top_pending();
+                if id != 0 {
+                    (id as u64) << 16 | id as u64
+                } else {
+                    0
+                }
+            }
+            STOPI => {
+                let id = self.imsic_s.top_pending();
+                if id != 0 {
+                    (id as u64) << 16 | 1
+                } else {
+                    0
+                }
             }
             // User HPM counters (hpmcounter3-31) — shadows of machine counters
             0xC03..=0xC1F => self.hpm_counters[(addr - 0xC03) as usize],
@@ -674,7 +875,28 @@ impl CsrFile {
                 self.regs[VXRM as usize] = (val >> 1) & 3;
             }
             VL | VTYPE | VLENB => {} // read-only from CSR instructions
-            MENVCFGH => {}           // RV64: writes ignored
+            // AIA CSRs
+            MISELECT => self.regs[MISELECT as usize] = val,
+            MIREG => {
+                let sel = self.regs[MISELECT as usize];
+                self.imsic_m.write_indirect(sel, val);
+            }
+            MTOPEI => {
+                // Write to mtopei claims the top interrupt (clears pending bit)
+                self.imsic_m.claim_top();
+            }
+            SISELECT => self.regs[SISELECT as usize] = val,
+            SIREG => {
+                let sel = self.regs[SISELECT as usize];
+                self.imsic_s.write_indirect(sel, val);
+            }
+            STOPEI => {
+                // Write to stopei claims the top interrupt (clears pending bit)
+                self.imsic_s.claim_top();
+            }
+            // mtopi/stopi are read-only
+            MTOPI | STOPI => {}
+            MENVCFGH => {} // RV64: writes ignored
             SATP => {
                 // Accept mode 0 (Bare), 8 (Sv39), 9 (Sv48), 10 (Sv57); ignore unsupported modes
                 let mode = val >> 60;

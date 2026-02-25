@@ -75,6 +75,15 @@ fn csr_name(addr: u16) -> &'static str {
         0x7A2 => "tdata2",
         0x7A3 => "tdata3",
         0x7A4 => "tinfo",
+        // AIA CSRs
+        0x150 => "siselect",
+        0x151 => "sireg",
+        0x15C => "stopei",
+        0xDB0 => "stopi",
+        0x350 => "miselect",
+        0x351 => "mireg",
+        0x35C => "mtopei",
+        0xFB0 => "mtopi",
         _ => "",
     }
 }

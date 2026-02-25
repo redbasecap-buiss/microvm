@@ -2,11 +2,11 @@ pub mod ram;
 pub mod rom;
 
 use crate::devices::{
-    clint::Clint, plic::Plic, rtc::GoldfishRtc, syscon::Syscon, uart::Uart, virtio_9p::Virtio9p,
-    virtio_balloon::VirtioBalloon, virtio_blk::VirtioBlk, virtio_console::VirtioConsole,
-    virtio_crypto::VirtioCrypto, virtio_gpu::VirtioGpu, virtio_input::VirtioInput,
-    virtio_iommu::VirtioIommu, virtio_net::VirtioNet, virtio_rng::VirtioRng,
-    virtio_sound::VirtioSound, virtio_vsock::VirtioVsock,
+    aplic::Aplic, clint::Clint, plic::Plic, rtc::GoldfishRtc, syscon::Syscon, uart::Uart,
+    virtio_9p::Virtio9p, virtio_balloon::VirtioBalloon, virtio_blk::VirtioBlk,
+    virtio_console::VirtioConsole, virtio_crypto::VirtioCrypto, virtio_gpu::VirtioGpu,
+    virtio_input::VirtioInput, virtio_iommu::VirtioIommu, virtio_net::VirtioNet,
+    virtio_rng::VirtioRng, virtio_sound::VirtioSound, virtio_vsock::VirtioVsock,
 };
 
 /// SBI HSM hart start request: (target_hart, start_addr, opaque)
@@ -60,6 +60,8 @@ pub const CLINT_BASE: u64 = 0x0200_0000;
 pub const CLINT_SIZE: u64 = 0x10000;
 pub const PLIC_BASE: u64 = 0x0C00_0000;
 pub const PLIC_SIZE: u64 = 0x400000;
+pub const APLIC_BASE: u64 = 0x0D00_0000; // AIA APLIC (S-mode domain)
+pub const APLIC_SIZE: u64 = 0x8000;
 pub const DRAM_BASE: u64 = 0x8000_0000;
 
 /// Physical memory bus with MMIO dispatch
@@ -80,6 +82,7 @@ pub struct Bus {
     pub virtio_vsock: VirtioVsock,
     pub virtio_crypto: VirtioCrypto,
     pub virtio_iommu: VirtioIommu,
+    pub aplic: Aplic,
     pub rtc: GoldfishRtc,
     pub syscon: Syscon,
     /// Pending hart start requests from SBI HSM
@@ -125,6 +128,7 @@ impl Bus {
             virtio_vsock: VirtioVsock::new(),
             virtio_crypto: VirtioCrypto::new(),
             virtio_iommu: VirtioIommu::new(),
+            aplic: Aplic::new(),
             rtc: GoldfishRtc::new(),
             syscon: Syscon::new(),
             hart_start_queue: Vec::new(),
@@ -144,7 +148,7 @@ impl Bus {
     /// Route a physical address to the correct MMIO device or RAM.
     /// Returns (device_id, offset) where device_id:
     ///   0=RAM, 1=UART, 2=VirtIO blk, 3=CLINT, 4=PLIC,
-    ///   5=VirtIO console, 6=VirtIO RNG, 7=VirtIO Net, 8=RTC, 9=Syscon, 10=VirtIO 9P, 11=VirtIO Input, 12=VirtIO Balloon, 13=VirtIO GPU, 14=VirtIO vsock, 15=VirtIO sound, 16=VirtIO crypto, 17=VirtIO IOMMU, 0xFF=unmapped
+    ///   5=VirtIO console, 6=VirtIO RNG, 7=VirtIO Net, 8=RTC, 9=Syscon, 10=VirtIO 9P, 11=VirtIO Input, 12=VirtIO Balloon, 13=VirtIO GPU, 14=VirtIO vsock, 15=VirtIO sound, 16=VirtIO crypto, 17=VirtIO IOMMU, 18=APLIC, 0xFF=unmapped
     #[inline(always)]
     fn route(&self, addr: u64) -> (u8, u64) {
         if addr >= DRAM_BASE {
@@ -204,6 +208,9 @@ impl Bus {
         if (PLIC_BASE..PLIC_BASE + PLIC_SIZE).contains(&addr) {
             return (4, addr - PLIC_BASE);
         }
+        if (APLIC_BASE..APLIC_BASE + APLIC_SIZE).contains(&addr) {
+            return (18, addr - APLIC_BASE);
+        }
         (0xFF, 0)
     }
 
@@ -227,6 +234,7 @@ impl Bus {
             (15, off) => self.virtio_sound.read(off) as u8,
             (16, off) => self.virtio_crypto.read(off) as u8,
             (17, off) => self.virtio_iommu.read(off) as u8,
+            (18, off) => self.aplic.read(off, 1) as u8,
             _ => {
                 log::trace!("Bus: unmapped read8 at {:#010x}", addr);
                 0
@@ -303,6 +311,7 @@ impl Bus {
             (15, off) => self.virtio_sound.read(off),
             (16, off) => self.virtio_crypto.read(off),
             (17, off) => self.virtio_iommu.read(off),
+            (18, off) => self.aplic.read_mut(off, 4) as u32,
             _ => {
                 log::trace!("Bus: unmapped read32 at {:#010x}", addr);
                 0
@@ -342,6 +351,7 @@ impl Bus {
             (15, off) => self.virtio_sound.write(off, val as u64),
             (16, off) => self.virtio_crypto.write(off, val as u64),
             (17, off) => self.virtio_iommu.write(off, val as u64),
+            (18, off) => self.aplic.write(off, val as u64, 1),
             _ => {
                 log::trace!("Bus: unmapped write8 at {:#010x} val={:#04x}", addr, val);
             }
@@ -381,6 +391,7 @@ impl Bus {
             (15, off) => self.virtio_sound.write(off, val as u64),
             (16, off) => self.virtio_crypto.write(off, val as u64),
             (17, off) => self.virtio_iommu.write(off, val as u64),
+            (18, off) => self.aplic.write(off, val as u64, 4),
             _ => {
                 log::trace!("Bus: unmapped write32 at {:#010x} val={:#010x}", addr, val);
             }

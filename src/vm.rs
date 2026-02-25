@@ -43,6 +43,7 @@ impl Vm {
         let mut bus = Bus::new(ram_bytes);
         bus.clint = crate::devices::clint::Clint::with_harts(num_harts);
         bus.plic = crate::devices::plic::Plic::with_harts(num_harts);
+        bus.aplic = crate::devices::aplic::Aplic::with_harts(num_harts);
         bus.num_harts = num_harts;
         // hart_states: 0=STARTED, 1=STOPPED, 2=START_PENDING, 3=STOP_PENDING, 4=SUSPENDED, 5=SUSPEND_PENDING, 6=RESUME_PENDING
         bus.hart_states = vec![1u64; num_harts]; // all STOPPED initially

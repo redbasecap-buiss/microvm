@@ -1,3 +1,4 @@
+pub mod aplic;
 pub mod clint;
 pub mod plic;
 pub mod rtc;

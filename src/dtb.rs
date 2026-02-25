@@ -408,7 +408,7 @@ pub fn generate_dtb_smp(
     let plic_phandle = num_harts as u32 + 1;
     let syscon_phandle = num_harts as u32 + 2;
 
-    let isa_str = "rv64imafdcvsu_zicsr_zifencei_zicbom_zicboz_zicbop_zicond_zihintpause_zawrs_zacas_zabha_zfa_zfh_zimop_zcmop_zcb_zba_zbb_zbs_zbc_zbkb_zbkc_zbkx_zknd_zkne_zknh_zkr_zve32f_zve64f_zve64d_zvbb_zvkg_zvkned_zvknhb_zvksed_zvksh_zvl128b_sstc_zicntr_zihpm_svinval_svnapot_svpbmt_svadu_smstateen_ssstateen_sscofpmf_smcntrpmf_sdtrig";
+    let isa_str = "rv64imafdcvsu_zicsr_zifencei_zicbom_zicboz_zicbop_zicond_zihintpause_zawrs_zacas_zabha_zfa_zfh_zimop_zcmop_zcb_zba_zbb_zbs_zbc_zbkb_zbkc_zbkx_zknd_zkne_zknh_zkr_zve32f_zve64f_zve64d_zvbb_zvkg_zvkned_zvknhb_zvksed_zvksh_zvl128b_sstc_zicntr_zihpm_svinval_svnapot_svpbmt_svadu_smstateen_ssstateen_sscofpmf_smcntrpmf_sdtrig_smaia_ssaia";
     let isa_extensions: &[&str] = &[
         "i",
         "m",
@@ -465,6 +465,8 @@ pub fn generate_dtb_smp(
         "sscofpmf",
         "smcntrpmf",
         "sdtrig",
+        "smaia",
+        "ssaia",
     ];
 
     for hart in 0..num_harts {
@@ -545,6 +547,33 @@ pub fn generate_dtb_smp(
     }
     b.prop_u32("riscv,ndev", 95);
     b.prop_u32("phandle", plic_phandle);
+    b.end_node();
+
+    // APLIC (AIA — Advanced Interrupt Architecture, direct delivery mode)
+    let aplic_phandle = syscon_phandle + 1;
+    b.begin_node(&format!("aplic@{:x}", memory::APLIC_BASE));
+    b.prop_str("compatible", "riscv,aplic");
+    b.prop_u32_array(
+        "reg",
+        &[
+            (memory::APLIC_BASE >> 32) as u32,
+            memory::APLIC_BASE as u32,
+            0,
+            memory::APLIC_SIZE as u32,
+        ],
+    );
+    b.prop_u32("#interrupt-cells", 2);
+    b.prop_null("interrupt-controller");
+    {
+        let mut aplic_ext = Vec::with_capacity(num_harts * 2);
+        for hart in 0..num_harts {
+            let phandle = hart as u32 + 1;
+            aplic_ext.extend_from_slice(&[phandle, 9]); // SEIP=9
+        }
+        b.prop_u32_array("interrupts-extended", &aplic_ext);
+    }
+    b.prop_u32("riscv,num-sources", 63);
+    b.prop_u32("phandle", aplic_phandle);
     b.end_node();
 
     // UART
