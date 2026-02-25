@@ -420,3 +420,809 @@ impl Mmu {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cpu::csr::{CsrFile, MSTATUS, SATP};
+    use crate::memory::Bus;
+
+    const DRAM_BASE: u64 = crate::memory::DRAM_BASE; // 0x8000_0000
+    const RAM_SIZE: u64 = 128 * 1024 * 1024; // 128 MiB
+
+    /// Helper: set up permissive PMP (allow all for S/U mode) and SATP.
+    fn setup_with_mode(root_page_phys: u64, mode: u64) -> (Bus, CsrFile, Mmu) {
+        let bus = Bus::new(RAM_SIZE);
+        let mut csrs = CsrFile::new();
+        let mmu = Mmu::new();
+        // Set SATP
+        let satp = (mode << 60) | (root_page_phys >> 12);
+        csrs.write_raw(SATP, satp);
+        // Set up PMP entry 0 as NAPOT covering all of address space (allow RWX)
+        // Use write() which updates the actual pmpcfg/pmpaddr fields
+        csrs.write(0x3B0, u64::MAX); // pmpaddr0
+                                     // pmpcfg0 byte 0: A=NAPOT(3), R=1, W=1, X=1 → 0b00011111 = 0x1F
+        csrs.write(0x3A0, 0x1F); // pmpcfg0
+        (bus, csrs, mmu)
+    }
+
+    fn setup_sv39(root_page_phys: u64) -> (Bus, CsrFile, Mmu) {
+        setup_with_mode(root_page_phys, 8)
+    }
+
+    fn setup_sv48(root_page_phys: u64) -> (Bus, CsrFile, Mmu) {
+        setup_with_mode(root_page_phys, 9)
+    }
+
+    fn setup_sv57(root_page_phys: u64) -> (Bus, CsrFile, Mmu) {
+        setup_with_mode(root_page_phys, 10)
+    }
+
+    /// Create a leaf PTE with given PPN and flags (V is always set).
+    fn leaf_pte(ppn: u64, flags: u64) -> u64 {
+        (ppn << 10) | PTE_V | flags
+    }
+
+    /// Create a non-leaf (pointer) PTE pointing to the given physical page table address.
+    fn pointer_pte(next_pt_phys: u64) -> u64 {
+        ((next_pt_phys >> 12) << 10) | PTE_V
+    }
+
+    // ======================== Sv39 4KiB page ========================
+
+    #[test]
+    fn test_sv39_4k_page_read() {
+        // Root page table at DRAM_BASE + 0x1_0000
+        let root_pt = DRAM_BASE + 0x1_0000;
+        let l1_pt = DRAM_BASE + 0x2_0000;
+        let l0_pt = DRAM_BASE + 0x3_0000;
+        let target_phys = DRAM_BASE + 0x4_0000; // physical page to map
+
+        let (mut bus, mut csrs, mut mmu) = setup_sv39(root_pt);
+
+        // Map vaddr 0x0000_0000_0040_0000 (VPN[2]=0, VPN[1]=2, VPN[0]=0)
+        let vaddr: u64 = 0x0040_0000;
+
+        // L2 (root): entry 0 → L1
+        bus.write64(root_pt + 0 * 8, pointer_pte(l1_pt));
+        // L1: entry 2 → L0
+        bus.write64(l1_pt + 2 * 8, pointer_pte(l0_pt));
+        // L0: entry 0 → leaf (R+W+A+D)
+        let target_ppn = target_phys >> 12;
+        bus.write64(
+            l0_pt + 0 * 8,
+            leaf_pte(target_ppn, PTE_R | PTE_W | PTE_A | PTE_D),
+        );
+
+        // Write a marker value at target physical address
+        bus.write64(target_phys + 0x100, 0xDEAD_BEEF_CAFE_BABE);
+
+        let result = mmu.translate(
+            vaddr + 0x100,
+            AccessType::Read,
+            PrivilegeMode::Supervisor,
+            &csrs,
+            &mut bus,
+        );
+        assert_eq!(result, Ok(target_phys + 0x100));
+    }
+
+    #[test]
+    fn test_sv39_4k_page_write_sets_dirty() {
+        let root_pt = DRAM_BASE + 0x1_0000;
+        let l1_pt = DRAM_BASE + 0x2_0000;
+        let l0_pt = DRAM_BASE + 0x3_0000;
+        let target_phys = DRAM_BASE + 0x4_0000;
+
+        let (mut bus, mut csrs, mut mmu) = setup_sv39(root_pt);
+
+        let vaddr: u64 = 0x0040_0000;
+        bus.write64(root_pt + 0 * 8, pointer_pte(l1_pt));
+        bus.write64(l1_pt + 2 * 8, pointer_pte(l0_pt));
+        // No A/D bits set initially
+        bus.write64(l0_pt + 0 * 8, leaf_pte(target_phys >> 12, PTE_R | PTE_W));
+
+        let result = mmu.translate(
+            vaddr,
+            AccessType::Write,
+            PrivilegeMode::Supervisor,
+            &csrs,
+            &mut bus,
+        );
+        assert_eq!(result, Ok(target_phys));
+
+        // Check that A and D bits were set by hardware
+        let pte_after = bus.read64(l0_pt + 0 * 8);
+        assert_ne!(pte_after & PTE_A, 0, "A bit should be set");
+        assert_ne!(pte_after & PTE_D, 0, "D bit should be set");
+    }
+
+    #[test]
+    fn test_sv39_2m_superpage() {
+        let root_pt = DRAM_BASE + 0x1_0000;
+        let l1_pt = DRAM_BASE + 0x2_0000;
+        // 2MiB superpage at physical 0x8020_0000 (aligned)
+        let target_base = DRAM_BASE + 0x20_0000;
+
+        let (mut bus, mut csrs, mut mmu) = setup_sv39(root_pt);
+
+        // vaddr = 0x0020_0000 → VPN[2]=0, VPN[1]=1, VPN[0]=0
+        let vaddr: u64 = 0x0020_0000;
+
+        bus.write64(root_pt + 0 * 8, pointer_pte(l1_pt));
+        // L1 entry 1: leaf (superpage 2MiB), PPN must have low 9 bits = 0
+        let ppn = target_base >> 12; // should have low 9 bits = 0 since 0x200000 >> 12 = 0x200
+        bus.write64(
+            l1_pt + 1 * 8,
+            leaf_pte(ppn, PTE_R | PTE_W | PTE_X | PTE_A | PTE_D),
+        );
+
+        // Access at offset 0x1234 within the 2MiB page
+        let result = mmu.translate(
+            vaddr + 0x1234,
+            AccessType::Read,
+            PrivilegeMode::Supervisor,
+            &csrs,
+            &mut bus,
+        );
+        assert_eq!(result, Ok(target_base + 0x1234));
+    }
+
+    #[test]
+    fn test_sv39_1g_superpage() {
+        let root_pt = DRAM_BASE + 0x1_0000;
+        // 1GiB superpage: map VPN[2]=0 directly to DRAM_BASE (aligned to 1GiB)
+        // DRAM_BASE = 0x8000_0000 is 2GiB aligned, so PPN low 18 bits are 0
+        let target_base = DRAM_BASE; // 0x8000_0000
+
+        let (mut bus, mut csrs, mut mmu) = setup_sv39(root_pt);
+
+        let vaddr: u64 = 0x0000_0000;
+        let ppn = target_base >> 12;
+        bus.write64(
+            root_pt + 0 * 8,
+            leaf_pte(ppn, PTE_R | PTE_W | PTE_X | PTE_A | PTE_D),
+        );
+
+        let result = mmu.translate(
+            vaddr + 0xABCD,
+            AccessType::Read,
+            PrivilegeMode::Supervisor,
+            &csrs,
+            &mut bus,
+        );
+        assert_eq!(result, Ok(target_base + 0xABCD));
+    }
+
+    // ======================== Sv48 ========================
+
+    #[test]
+    fn test_sv48_4k_page() {
+        let root_pt = DRAM_BASE + 0x1_0000;
+        let l2_pt = DRAM_BASE + 0x2_0000;
+        let l1_pt = DRAM_BASE + 0x3_0000;
+        let l0_pt = DRAM_BASE + 0x4_0000;
+        let target_phys = DRAM_BASE + 0x5_0000;
+
+        let (mut bus, mut csrs, mut mmu) = setup_sv48(root_pt);
+
+        // vaddr = 0x0000_0000_0040_1000
+        // VPN[3]=0, VPN[2]=0, VPN[1]=2, VPN[0]=1
+        let vaddr: u64 = 0x0040_1000;
+
+        bus.write64(root_pt + 0 * 8, pointer_pte(l2_pt));
+        bus.write64(l2_pt + 0 * 8, pointer_pte(l1_pt));
+        bus.write64(l1_pt + 2 * 8, pointer_pte(l0_pt));
+        bus.write64(
+            l0_pt + 1 * 8,
+            leaf_pte(target_phys >> 12, PTE_R | PTE_X | PTE_A | PTE_D),
+        );
+
+        let result = mmu.translate(
+            vaddr + 0x42,
+            AccessType::Execute,
+            PrivilegeMode::Supervisor,
+            &csrs,
+            &mut bus,
+        );
+        assert_eq!(result, Ok(target_phys + 0x42));
+    }
+
+    // ======================== Sv57 ========================
+
+    #[test]
+    fn test_sv57_4k_page() {
+        let root_pt = DRAM_BASE + 0x1_0000;
+        let l3_pt = DRAM_BASE + 0x2_0000;
+        let l2_pt = DRAM_BASE + 0x3_0000;
+        let l1_pt = DRAM_BASE + 0x4_0000;
+        let l0_pt = DRAM_BASE + 0x5_0000;
+        let target_phys = DRAM_BASE + 0x6_0000;
+
+        let (mut bus, mut csrs, mut mmu) = setup_sv57(root_pt);
+
+        let vaddr: u64 = 0x0020_0000; // VPN[4]=0, VPN[3]=0, VPN[2]=0, VPN[1]=1, VPN[0]=0
+
+        bus.write64(root_pt + 0 * 8, pointer_pte(l3_pt));
+        bus.write64(l3_pt + 0 * 8, pointer_pte(l2_pt));
+        bus.write64(l2_pt + 0 * 8, pointer_pte(l1_pt));
+        bus.write64(l1_pt + 1 * 8, pointer_pte(l0_pt));
+        bus.write64(
+            l0_pt + 0 * 8,
+            leaf_pte(target_phys >> 12, PTE_R | PTE_W | PTE_A | PTE_D),
+        );
+
+        let result = mmu.translate(
+            vaddr + 0x10,
+            AccessType::Read,
+            PrivilegeMode::Supervisor,
+            &csrs,
+            &mut bus,
+        );
+        assert_eq!(result, Ok(target_phys + 0x10));
+    }
+
+    // ======================== Permission checks ========================
+
+    #[test]
+    fn test_read_permission_denied() {
+        let root_pt = DRAM_BASE + 0x1_0000;
+        let l1_pt = DRAM_BASE + 0x2_0000;
+        let l0_pt = DRAM_BASE + 0x3_0000;
+        let target_phys = DRAM_BASE + 0x4_0000;
+
+        let (mut bus, mut csrs, mut mmu) = setup_sv39(root_pt);
+
+        let vaddr: u64 = 0x0040_0000;
+        bus.write64(root_pt + 0 * 8, pointer_pte(l1_pt));
+        bus.write64(l1_pt + 2 * 8, pointer_pte(l0_pt));
+        // Execute-only page (no R, no W)
+        bus.write64(
+            l0_pt + 0 * 8,
+            leaf_pte(target_phys >> 12, PTE_X | PTE_A | PTE_D),
+        );
+
+        let result = mmu.translate(
+            vaddr,
+            AccessType::Read,
+            PrivilegeMode::Supervisor,
+            &csrs,
+            &mut bus,
+        );
+        assert_eq!(result, Err(13)); // Load page fault
+    }
+
+    #[test]
+    fn test_write_permission_denied() {
+        let root_pt = DRAM_BASE + 0x1_0000;
+        let l1_pt = DRAM_BASE + 0x2_0000;
+        let l0_pt = DRAM_BASE + 0x3_0000;
+        let target_phys = DRAM_BASE + 0x4_0000;
+
+        let (mut bus, mut csrs, mut mmu) = setup_sv39(root_pt);
+
+        let vaddr: u64 = 0x0040_0000;
+        bus.write64(root_pt + 0 * 8, pointer_pte(l1_pt));
+        bus.write64(l1_pt + 2 * 8, pointer_pte(l0_pt));
+        // Read-only page
+        bus.write64(
+            l0_pt + 0 * 8,
+            leaf_pte(target_phys >> 12, PTE_R | PTE_A | PTE_D),
+        );
+
+        let result = mmu.translate(
+            vaddr,
+            AccessType::Write,
+            PrivilegeMode::Supervisor,
+            &csrs,
+            &mut bus,
+        );
+        assert_eq!(result, Err(15)); // Store page fault
+    }
+
+    #[test]
+    fn test_execute_permission_denied() {
+        let root_pt = DRAM_BASE + 0x1_0000;
+        let l1_pt = DRAM_BASE + 0x2_0000;
+        let l0_pt = DRAM_BASE + 0x3_0000;
+        let target_phys = DRAM_BASE + 0x4_0000;
+
+        let (mut bus, mut csrs, mut mmu) = setup_sv39(root_pt);
+
+        let vaddr: u64 = 0x0040_0000;
+        bus.write64(root_pt + 0 * 8, pointer_pte(l1_pt));
+        bus.write64(l1_pt + 2 * 8, pointer_pte(l0_pt));
+        // Read+Write, no execute
+        bus.write64(
+            l0_pt + 0 * 8,
+            leaf_pte(target_phys >> 12, PTE_R | PTE_W | PTE_A | PTE_D),
+        );
+
+        let result = mmu.translate(
+            vaddr,
+            AccessType::Execute,
+            PrivilegeMode::Supervisor,
+            &csrs,
+            &mut bus,
+        );
+        assert_eq!(result, Err(12)); // Instruction page fault
+    }
+
+    #[test]
+    fn test_user_page_from_supervisor_denied() {
+        let root_pt = DRAM_BASE + 0x1_0000;
+        let l1_pt = DRAM_BASE + 0x2_0000;
+        let l0_pt = DRAM_BASE + 0x3_0000;
+        let target_phys = DRAM_BASE + 0x4_0000;
+
+        let (mut bus, mut csrs, mut mmu) = setup_sv39(root_pt);
+
+        let vaddr: u64 = 0x0040_0000;
+        bus.write64(root_pt + 0 * 8, pointer_pte(l1_pt));
+        bus.write64(l1_pt + 2 * 8, pointer_pte(l0_pt));
+        // User page (PTE_U set)
+        bus.write64(
+            l0_pt + 0 * 8,
+            leaf_pte(target_phys >> 12, PTE_R | PTE_W | PTE_U | PTE_A | PTE_D),
+        );
+
+        // Supervisor without SUM should fault
+        let result = mmu.translate(
+            vaddr,
+            AccessType::Read,
+            PrivilegeMode::Supervisor,
+            &csrs,
+            &mut bus,
+        );
+        assert_eq!(result, Err(13)); // Load page fault
+    }
+
+    #[test]
+    fn test_user_page_from_supervisor_with_sum() {
+        let root_pt = DRAM_BASE + 0x1_0000;
+        let l1_pt = DRAM_BASE + 0x2_0000;
+        let l0_pt = DRAM_BASE + 0x3_0000;
+        let target_phys = DRAM_BASE + 0x4_0000;
+
+        let (mut bus, mut csrs, mut mmu) = setup_sv39(root_pt);
+
+        // Set SUM bit (bit 18) in MSTATUS
+        csrs.write_raw(MSTATUS, csrs.read(MSTATUS) | (1 << 18));
+
+        let vaddr: u64 = 0x0040_0000;
+        bus.write64(root_pt + 0 * 8, pointer_pte(l1_pt));
+        bus.write64(l1_pt + 2 * 8, pointer_pte(l0_pt));
+        bus.write64(
+            l0_pt + 0 * 8,
+            leaf_pte(target_phys >> 12, PTE_R | PTE_W | PTE_U | PTE_A | PTE_D),
+        );
+
+        let result = mmu.translate(
+            vaddr,
+            AccessType::Read,
+            PrivilegeMode::Supervisor,
+            &csrs,
+            &mut bus,
+        );
+        assert_eq!(result, Ok(target_phys));
+    }
+
+    #[test]
+    fn test_mxr_allows_read_on_execute_only() {
+        let root_pt = DRAM_BASE + 0x1_0000;
+        let l1_pt = DRAM_BASE + 0x2_0000;
+        let l0_pt = DRAM_BASE + 0x3_0000;
+        let target_phys = DRAM_BASE + 0x4_0000;
+
+        let (mut bus, mut csrs, mut mmu) = setup_sv39(root_pt);
+
+        // Set MXR bit (bit 19) in MSTATUS
+        csrs.write_raw(MSTATUS, csrs.read(MSTATUS) | (1 << 19));
+
+        let vaddr: u64 = 0x0040_0000;
+        bus.write64(root_pt + 0 * 8, pointer_pte(l1_pt));
+        bus.write64(l1_pt + 2 * 8, pointer_pte(l0_pt));
+        // Execute-only page
+        bus.write64(
+            l0_pt + 0 * 8,
+            leaf_pte(target_phys >> 12, PTE_X | PTE_A | PTE_D),
+        );
+
+        // With MXR, read should succeed on X-only pages
+        let result = mmu.translate(
+            vaddr,
+            AccessType::Read,
+            PrivilegeMode::Supervisor,
+            &csrs,
+            &mut bus,
+        );
+        assert_eq!(result, Ok(target_phys));
+    }
+
+    // ======================== Invalid PTEs ========================
+
+    #[test]
+    fn test_invalid_pte_causes_page_fault() {
+        let root_pt = DRAM_BASE + 0x1_0000;
+        let (mut bus, mut csrs, mut mmu) = setup_sv39(root_pt);
+
+        // Root entry 0 is not valid (all zeros)
+        let result = mmu.translate(
+            0x1000,
+            AccessType::Read,
+            PrivilegeMode::Supervisor,
+            &csrs,
+            &mut bus,
+        );
+        assert_eq!(result, Err(13));
+    }
+
+    #[test]
+    fn test_misaligned_superpage_faults() {
+        let root_pt = DRAM_BASE + 0x1_0000;
+        let l1_pt = DRAM_BASE + 0x2_0000;
+
+        let (mut bus, mut csrs, mut mmu) = setup_sv39(root_pt);
+
+        let vaddr: u64 = 0x0020_0000;
+        bus.write64(root_pt + 0 * 8, pointer_pte(l1_pt));
+        // 2MiB superpage with misaligned PPN (low 9 bits of PPN != 0)
+        let bad_ppn = (DRAM_BASE >> 12) | 0x1; // low bit set → misaligned
+        bus.write64(
+            l1_pt + 1 * 8,
+            leaf_pte(bad_ppn, PTE_R | PTE_W | PTE_A | PTE_D),
+        );
+
+        let result = mmu.translate(
+            vaddr,
+            AccessType::Read,
+            PrivilegeMode::Supervisor,
+            &csrs,
+            &mut bus,
+        );
+        assert_eq!(result, Err(13)); // page fault due to misalignment
+    }
+
+    // ======================== Svpbmt ========================
+
+    #[test]
+    fn test_svpbmt_reserved_encoding_faults() {
+        let root_pt = DRAM_BASE + 0x1_0000;
+        let l1_pt = DRAM_BASE + 0x2_0000;
+        let l0_pt = DRAM_BASE + 0x3_0000;
+        let target_phys = DRAM_BASE + 0x4_0000;
+
+        let (mut bus, mut csrs, mut mmu) = setup_sv39(root_pt);
+
+        let vaddr: u64 = 0x0040_0000;
+        bus.write64(root_pt + 0 * 8, pointer_pte(l1_pt));
+        bus.write64(l1_pt + 2 * 8, pointer_pte(l0_pt));
+        // Leaf with PBMT=3 (reserved) → should fault
+        let pte = leaf_pte(target_phys >> 12, PTE_R | PTE_W | PTE_A | PTE_D) | PTE_PBMT_RSVD;
+        bus.write64(l0_pt + 0 * 8, pte);
+
+        let result = mmu.translate(
+            vaddr,
+            AccessType::Read,
+            PrivilegeMode::Supervisor,
+            &csrs,
+            &mut bus,
+        );
+        assert_eq!(result, Err(13));
+    }
+
+    // ======================== Svnapot ========================
+
+    #[test]
+    fn test_svnapot_64k_page() {
+        let root_pt = DRAM_BASE + 0x1_0000;
+        let l1_pt = DRAM_BASE + 0x2_0000;
+        let l0_pt = DRAM_BASE + 0x3_0000;
+        // 64KiB NAPOT: ppn[3:0] = 0b0111, effective page is 16×4KiB
+        // Target base physical = DRAM_BASE + 0x10_0000 (must be 64KiB aligned)
+        let target_base = DRAM_BASE + 0x10_0000;
+
+        let (mut bus, mut csrs, mut mmu) = setup_sv39(root_pt);
+
+        let vaddr: u64 = 0x0040_0000;
+        bus.write64(root_pt + 0 * 8, pointer_pte(l1_pt));
+        bus.write64(l1_pt + 2 * 8, pointer_pte(l0_pt));
+
+        // NAPOT PTE: ppn[3:0]=0111, N bit set
+        // Must fill all 16 entries in the NAPOT group since HW walks to exact VPN[0]
+        let base_ppn = target_base >> 12;
+        let napot_ppn = (base_ppn & !0xF) | 0x7;
+        let pte = leaf_pte(napot_ppn, PTE_R | PTE_W | PTE_A | PTE_D) | PTE_N;
+        for i in 0..16 {
+            bus.write64(l0_pt + i * 8, pte);
+        }
+
+        // Access at offset 0x8000 (VPN[0]=8) within the 64KiB NAPOT range
+        let result = mmu.translate(
+            vaddr + 0x8000,
+            AccessType::Read,
+            PrivilegeMode::Supervisor,
+            &csrs,
+            &mut bus,
+        );
+        assert_eq!(result, Ok(target_base + 0x8000));
+
+        // Also test offset 0 (VPN[0]=0)
+        let result = mmu.translate(
+            vaddr,
+            AccessType::Read,
+            PrivilegeMode::Supervisor,
+            &csrs,
+            &mut bus,
+        );
+        assert_eq!(result, Ok(target_base));
+    }
+
+    #[test]
+    fn test_svnapot_on_superpage_faults() {
+        let root_pt = DRAM_BASE + 0x1_0000;
+        let l1_pt = DRAM_BASE + 0x2_0000;
+
+        let (mut bus, mut csrs, mut mmu) = setup_sv39(root_pt);
+
+        let vaddr: u64 = 0x0020_0000;
+        bus.write64(root_pt + 0 * 8, pointer_pte(l1_pt));
+        // N bit on a level-1 (2MiB) superpage → reserved → fault
+        let ppn = (DRAM_BASE + 0x20_0000) >> 12;
+        let pte = leaf_pte(ppn, PTE_R | PTE_W | PTE_A | PTE_D) | PTE_N;
+        bus.write64(l1_pt + 1 * 8, pte);
+
+        let result = mmu.translate(
+            vaddr,
+            AccessType::Read,
+            PrivilegeMode::Supervisor,
+            &csrs,
+            &mut bus,
+        );
+        assert_eq!(result, Err(13));
+    }
+
+    #[test]
+    fn test_svnapot_invalid_pattern_faults() {
+        let root_pt = DRAM_BASE + 0x1_0000;
+        let l1_pt = DRAM_BASE + 0x2_0000;
+        let l0_pt = DRAM_BASE + 0x3_0000;
+
+        let (mut bus, mut csrs, mut mmu) = setup_sv39(root_pt);
+
+        let vaddr: u64 = 0x0040_0000;
+        bus.write64(root_pt + 0 * 8, pointer_pte(l1_pt));
+        bus.write64(l1_pt + 2 * 8, pointer_pte(l0_pt));
+
+        // NAPOT with ppn[3:0]=0b0011 (not 0b0111) → reserved → fault
+        let base_ppn = (DRAM_BASE + 0x10_0000) >> 12;
+        let bad_napot_ppn = (base_ppn & !0xF) | 0x3;
+        let pte = leaf_pte(bad_napot_ppn, PTE_R | PTE_W | PTE_A | PTE_D) | PTE_N;
+        bus.write64(l0_pt + 0 * 8, pte);
+
+        let result = mmu.translate(
+            vaddr,
+            AccessType::Read,
+            PrivilegeMode::Supervisor,
+            &csrs,
+            &mut bus,
+        );
+        assert_eq!(result, Err(13));
+    }
+
+    // ======================== TLB ========================
+
+    #[test]
+    fn test_tlb_caches_translation() {
+        let root_pt = DRAM_BASE + 0x1_0000;
+        let l1_pt = DRAM_BASE + 0x2_0000;
+        let l0_pt = DRAM_BASE + 0x3_0000;
+        let target_phys = DRAM_BASE + 0x4_0000;
+
+        let (mut bus, mut csrs, mut mmu) = setup_sv39(root_pt);
+
+        let vaddr: u64 = 0x0040_0000;
+        bus.write64(root_pt + 0 * 8, pointer_pte(l1_pt));
+        bus.write64(l1_pt + 2 * 8, pointer_pte(l0_pt));
+        bus.write64(
+            l0_pt + 0 * 8,
+            leaf_pte(target_phys >> 12, PTE_R | PTE_W | PTE_A | PTE_D),
+        );
+
+        // First access: TLB miss
+        let _ = mmu.translate(
+            vaddr,
+            AccessType::Read,
+            PrivilegeMode::Supervisor,
+            &csrs,
+            &mut bus,
+        );
+        assert_eq!(mmu.tlb_misses, 1);
+        assert_eq!(mmu.tlb_hits, 0);
+
+        // Second access: TLB hit
+        let result = mmu.translate(
+            vaddr + 0x10,
+            AccessType::Read,
+            PrivilegeMode::Supervisor,
+            &csrs,
+            &mut bus,
+        );
+        assert_eq!(result, Ok(target_phys + 0x10));
+        assert_eq!(mmu.tlb_hits, 1);
+    }
+
+    #[test]
+    fn test_tlb_flush_invalidates() {
+        let root_pt = DRAM_BASE + 0x1_0000;
+        let l1_pt = DRAM_BASE + 0x2_0000;
+        let l0_pt = DRAM_BASE + 0x3_0000;
+        let target_phys = DRAM_BASE + 0x4_0000;
+
+        let (mut bus, mut csrs, mut mmu) = setup_sv39(root_pt);
+
+        let vaddr: u64 = 0x0040_0000;
+        bus.write64(root_pt + 0 * 8, pointer_pte(l1_pt));
+        bus.write64(l1_pt + 2 * 8, pointer_pte(l0_pt));
+        bus.write64(
+            l0_pt + 0 * 8,
+            leaf_pte(target_phys >> 12, PTE_R | PTE_W | PTE_A | PTE_D),
+        );
+
+        // Populate TLB
+        let _ = mmu.translate(
+            vaddr,
+            AccessType::Read,
+            PrivilegeMode::Supervisor,
+            &csrs,
+            &mut bus,
+        );
+        assert_eq!(mmu.tlb_misses, 1);
+
+        // Flush TLB
+        mmu.flush_tlb();
+
+        // Next access should miss again
+        let _ = mmu.translate(
+            vaddr,
+            AccessType::Read,
+            PrivilegeMode::Supervisor,
+            &csrs,
+            &mut bus,
+        );
+        assert_eq!(mmu.tlb_misses, 2);
+    }
+
+    #[test]
+    fn test_tlb_flush_vaddr() {
+        let root_pt = DRAM_BASE + 0x1_0000;
+        let l1_pt = DRAM_BASE + 0x2_0000;
+        let l0_pt = DRAM_BASE + 0x3_0000;
+        let target_phys = DRAM_BASE + 0x4_0000;
+
+        let (mut bus, mut csrs, mut mmu) = setup_sv39(root_pt);
+
+        let vaddr: u64 = 0x0040_0000;
+        bus.write64(root_pt + 0 * 8, pointer_pte(l1_pt));
+        bus.write64(l1_pt + 2 * 8, pointer_pte(l0_pt));
+        bus.write64(
+            l0_pt + 0 * 8,
+            leaf_pte(target_phys >> 12, PTE_R | PTE_W | PTE_A | PTE_D),
+        );
+
+        // Populate TLB
+        let _ = mmu.translate(
+            vaddr,
+            AccessType::Read,
+            PrivilegeMode::Supervisor,
+            &csrs,
+            &mut bus,
+        );
+
+        // Flush only that vaddr
+        mmu.flush_tlb_vaddr(vaddr);
+
+        // Should miss again
+        let _ = mmu.translate(
+            vaddr,
+            AccessType::Read,
+            PrivilegeMode::Supervisor,
+            &csrs,
+            &mut bus,
+        );
+        assert_eq!(mmu.tlb_misses, 2);
+    }
+
+    // ======================== Bare mode / M-mode ========================
+
+    #[test]
+    fn test_bare_mode_passthrough() {
+        let (mut bus, mut csrs, mut mmu) = setup_sv39(DRAM_BASE + 0x1_0000);
+        // Override SATP to bare mode (mode=0)
+        csrs.write_raw(SATP, 0);
+
+        let addr = DRAM_BASE + 0x100;
+        let result = mmu.translate(
+            addr,
+            AccessType::Read,
+            PrivilegeMode::Supervisor,
+            &csrs,
+            &mut bus,
+        );
+        assert_eq!(result, Ok(addr));
+    }
+
+    #[test]
+    fn test_machine_mode_no_translation() {
+        let root_pt = DRAM_BASE + 0x1_0000;
+        let (mut bus, mut csrs, mut mmu) = setup_sv39(root_pt);
+        // Don't set up any page tables — M-mode bypasses translation
+
+        let addr = DRAM_BASE + 0x200;
+        let result = mmu.translate(
+            addr,
+            AccessType::Read,
+            PrivilegeMode::Machine,
+            &csrs,
+            &mut bus,
+        );
+        assert_eq!(result, Ok(addr));
+    }
+
+    // ======================== User mode ========================
+
+    #[test]
+    fn test_user_mode_access_to_user_page() {
+        let root_pt = DRAM_BASE + 0x1_0000;
+        let l1_pt = DRAM_BASE + 0x2_0000;
+        let l0_pt = DRAM_BASE + 0x3_0000;
+        let target_phys = DRAM_BASE + 0x4_0000;
+
+        let (mut bus, mut csrs, mut mmu) = setup_sv39(root_pt);
+
+        let vaddr: u64 = 0x0040_0000;
+        bus.write64(root_pt + 0 * 8, pointer_pte(l1_pt));
+        bus.write64(l1_pt + 2 * 8, pointer_pte(l0_pt));
+        bus.write64(
+            l0_pt + 0 * 8,
+            leaf_pte(target_phys >> 12, PTE_R | PTE_W | PTE_U | PTE_A | PTE_D),
+        );
+
+        let result = mmu.translate(
+            vaddr,
+            AccessType::Read,
+            PrivilegeMode::User,
+            &csrs,
+            &mut bus,
+        );
+        assert_eq!(result, Ok(target_phys));
+    }
+
+    #[test]
+    fn test_user_mode_denied_supervisor_page() {
+        let root_pt = DRAM_BASE + 0x1_0000;
+        let l1_pt = DRAM_BASE + 0x2_0000;
+        let l0_pt = DRAM_BASE + 0x3_0000;
+        let target_phys = DRAM_BASE + 0x4_0000;
+
+        let (mut bus, mut csrs, mut mmu) = setup_sv39(root_pt);
+
+        let vaddr: u64 = 0x0040_0000;
+        bus.write64(root_pt + 0 * 8, pointer_pte(l1_pt));
+        bus.write64(l1_pt + 2 * 8, pointer_pte(l0_pt));
+        // No U bit → supervisor page
+        bus.write64(
+            l0_pt + 0 * 8,
+            leaf_pte(target_phys >> 12, PTE_R | PTE_W | PTE_A | PTE_D),
+        );
+
+        let result = mmu.translate(
+            vaddr,
+            AccessType::Read,
+            PrivilegeMode::User,
+            &csrs,
+            &mut bus,
+        );
+        assert_eq!(result, Err(13));
+    }
+}
